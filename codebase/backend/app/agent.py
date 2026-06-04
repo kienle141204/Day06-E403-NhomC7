@@ -1,7 +1,11 @@
+"""LLM chat agent for medication Q&A.
+
+This module handles LLM-based chat responses as a fallback
+when rule-based intent detection cannot handle the question.
+All safety rules are centralized in safety_service.py.
+"""
 import json
 import os
-import re
-import unicodedata
 
 from fastapi import HTTPException
 from openai import OpenAI
@@ -14,40 +18,7 @@ from .prompts import (
     PRESCRIPTION_CONTEXT_TEMPLATE,
     USER_MESSAGE_TEMPLATE,
 )
-
-
-DANGEROUS_REQUEST_PATTERNS = [
-    r"\bchan doan\b",
-    r"\bbenh gi\b",
-    r"\bco bi\b",
-    r"\btu dieu tri\b",
-    r"\bdieu tri thay\b",
-    r"\bdoi thuoc\b",
-    r"\bngung thuoc\b",
-    r"\bbo thuoc\b",
-    r"\btang lieu\b",
-    r"\bgiam lieu\b",
-    r"\buong them\b",
-    r"\bthem thuoc\b",
-    r"\bthay lieu\b",
-    r"\bthay doi lieu\b",
-    r"\bco nen ngung\b",
-    r"\bco nen bo\b",
-    r"\bco nen tang\b",
-    r"\bco nen giam\b",
-    r"\bdoctor\b",
-]
-
-
-def normalize_text(value: str) -> str:
-    value = value.replace("đ", "d").replace("Đ", "d")
-    normalized = unicodedata.normalize("NFD", value)
-    return "".join(char for char in normalized if unicodedata.category(char) != "Mn").lower()
-
-
-def is_dangerous_request(message: str) -> bool:
-    normalized = normalize_text(message)
-    return any(re.search(pattern, normalized) for pattern in DANGEROUS_REQUEST_PATTERNS)
+from .services.safety_service import is_dangerous_request
 
 
 def build_prompt(
@@ -55,6 +26,7 @@ def build_prompt(
     message: str,
     history: list[dict] | None = None,
 ) -> list[dict]:
+    """Build messages for LLM chat completion."""
     prescription_json = json.dumps(prescription, ensure_ascii=False, indent=2)
     messages = [
         {"role": "developer", "content": MEDICATION_AGENT_PROMPT},
@@ -73,6 +45,12 @@ def answer_medication_question(
     message: str,
     history: list[dict] | None = None,
 ) -> dict:
+    """
+    Answer medication question via LLM.
+
+    Falls back to dangerous request response if the question
+    is flagged by safety_service.is_dangerous_request().
+    """
     if is_dangerous_request(message):
         return {
             "answer": DANGEROUS_REQUEST_ANSWER,

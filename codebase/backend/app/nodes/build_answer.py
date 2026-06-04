@@ -1,102 +1,89 @@
 """Chat node: build the answer based on detected intent."""
-import re
+from app.prompts import MEDICATION_QUICK_REPLIES
+from app.services.text_utils import normalize_for_match
 
-from ..prompts import MEDICATION_QUICK_REPLIES
-from ..services.safety_service import SAFETY_NOTICE
+JOIN = "".join
 
-
-# ---------------------------------------------------------------------------
-# Helpers (ported from chat_service.py)
-# ---------------------------------------------------------------------------
-
-_VN_MAP: dict[str, str] = {
-    'à': 'a', 'á': 'a', 'ả': 'a', 'ã': 'a', 'ạ': 'a',
-    'ă': 'a', 'ằ': 'a', 'ắ': 'a', 'ẳ': 'a', 'ẵ': 'a', 'ặ': 'a',
-    'â': 'a', 'ầ': 'a', 'ấ': 'a', 'ẩ': 'a', 'ẫ': 'a', 'ậ': 'a',
-    'è': 'e', 'é': 'e', 'ẻ': 'e', 'ẽ': 'e', 'ẹ': 'e',
-    'ê': 'e', 'ề': 'e', 'ế': 'e', 'ể': 'e', 'ễ': 'e', 'ệ': 'e',
-    'ì': 'i', 'í': 'i', 'ỉ': 'i', 'ĩ': 'i', 'ị': 'i',
-    'ò': 'o', 'ó': 'o', 'ỏ': 'o', 'õ': 'o', 'ọ': 'o',
-    'ô': 'o', 'ồ': 'o', 'ố': 'o', 'ổ': 'o', 'ỗ': 'o', 'ộ': 'o',
-    'ơ': 'o', 'ờ': 'o', 'ớ': 'o', 'ở': 'o', 'ỡ': 'o', 'ợ': 'o',
-    'ù': 'u', 'ú': 'u', 'ủ': 'u', 'ũ': 'u', 'ụ': 'u',
-    'ư': 'u', 'ừ': 'u', 'ứ': 'u', 'ử': 'u', 'ữ': 'u', 'ự': 'u',
-    'ỳ': 'y', 'ý': 'y', 'ỷ': 'y', 'ỹ': 'y', 'ỵ': 'y',
-    'đ': 'd',
-}
-
-
-def _to_ascii(text: str) -> str:
-    return "".join(_VN_MAP.get(c, c) for c in text)
-
-
-def _norm(text: str) -> str:
-    return _to_ascii(text or "").lower()
-
-
-def _build_uses_answer(medications: list) -> tuple[str, list]:
+def build_uses(medications):
     related = []
-    lines = ["Công dụng của các thuốc trong đơn:"]
+    lines = ["Cong dung cua cac thuoc trong don:"]
     for med in medications:
         name = med.get("raw_name") or med.get("name", "Unknown")
         uses = med.get("uses_vi") or []
         related.append(name)
         if not med.get("found"):
-            lines.append(f"• {name}: Chưa tìm thấy thông tin, cần hỏi dược sĩ/bác sĩ.")
+            lines.append("- " + name + ": Chua tim thay thong tin, can hoi duoc si/bac si.")
         elif uses and any(u for u in uses if u):
-            lines.append(f"• {name}: {'; '.join(u for u in uses if u)}")
+            uses_text = "; ".join(u for u in uses if u)
+            lines.append("- " + name + ": " + uses_text)
         else:
-            lines.append(f"• {name}: Chưa có đủ dữ liệu công dụng, cần hỏi dược sĩ/bác sĩ.")
-    return "\n".join(lines), related
+            lines.append("- " + name + ": Chua co du du lieu cong dung, can hoi duoc si/bac si.")
+    return JOIN(lines), related
 
-
-def _build_drowsiness_answer(medications: list) -> tuple[str, list]:
+def build_drowsiness(medications):
     related = []
-    lines = ["Các thuốc có thể gây buồn ngủ hoặc chóng mặt:"]
+    lines = ["Cac thuoc co the gay buon ngu hoac chong mat:"]
     found_any = False
     for med in medications:
         name = med.get("raw_name") or med.get("name", "Unknown")
-        category = _norm(med.get("category_vi") or "")
-        notes_text = _norm(" ".join(med.get("important_notes_vi") or []))
-        if any(k in category or k in notes_text for k in ["khang histamin", "chong di ung", "buon ngu", "chong mat", "lai xe", "nga"]):
+        category = normalize_for_match(med.get("category_vi") or "")
+        notes_list = med.get("important_notes_vi") or []
+        notes_text = normalize_for_match(" ".join(notes_list))
+        drowsy_keywords = ["khang histamin", "chong di ung", "buon ngu", "chong mat", "lai xe", "nga"]
+        is_drowsy = False
+        for kw in drowsy_keywords:
+            if kw in category or kw in notes_text:
+                is_drowsy = True
+                break
+        if is_drowsy:
             found_any = True
             related.append(name)
-            notes = [n for n in (med.get("important_notes_vi") or []) if n]
-            lines.append(f"• {name}: {'; '.join(notes) if notes else 'Thuốc có thể gây buồn ngủ nhẹ.'}")
+            valid_notes = [n for n in notes_list if n]
+            if valid_notes:
+                note_text = "; ".join(valid_notes)
+                lines.append("- " + name + ": " + note_text)
+            else:
+                lines.append("- " + name + ": Thuoc co the gay buon ngu nhe.")
     if not found_any:
-        lines.append("Trong dữ liệu hiện tại chưa thấy thuốc nào ghi chú rõ về buồn ngủ.")
-        lines.append("Nếu bạn thấy buồn ngủ/chóng mặt, nên tránh lái xe và hỏi dược sĩ/bác sĩ.")
-    return "\n".join(lines), related
+        lines.append("Trong du lieu hien tai chua thay thuoc nao ghi chu ro ve buon ngu.")
+        lines.append("Neu ban thay buon ngu/chong mat, nen tran lai xe va hoi duoc si/bac si.")
+    return JOIN(lines), related
 
-
-def _build_antibiotic_answer(medications: list) -> tuple[str, list]:
+def build_antibiotic(medications):
     related = []
-    lines = ["Các thuốc kháng sinh trong đơn:"]
+    lines = ["Cac thuoc khang sinh trong don:"]
     found_any = False
+    antibiotic_keywords = ["khang sinh", "amoxicillin", "azithromycin", "ciprofloxacin", "metronidazole", "cephalosporin"]
     for med in medications:
         name = med.get("raw_name") or med.get("name", "Unknown")
-        category = _norm(med.get("category_vi") or "")
-        ingredient = _norm(med.get("ingredient_vi") or "")
-        if any(k in category or k in ingredient for k in [
-            "khang sinh", "amoxicillin", "azithromycin", "ciprofloxacin", "metronidazole", "cephalosporin"
-        ]):
+        category = normalize_for_match(med.get("category_vi") or "")
+        ingredient = normalize_for_match(med.get("ingredient_vi") or "")
+        is_antibiotic = False
+        for kw in antibiotic_keywords:
+            if kw in category or kw in ingredient:
+                is_antibiotic = True
+                break
+        if is_antibiotic:
             found_any = True
             related.append(name)
             cat_orig = med.get("category_vi") or ""
-            lines.append(f"• {name}{f' ({cat_orig})' if cat_orig else ''}")
+            if cat_orig:
+                lines.append("- " + name + " (" + cat_orig + ")")
+            else:
+                lines.append("- " + name)
     if not found_any:
-        lines.append("Không có thuốc kháng sinh nào trong đơn này.")
+        lines.append("Khong co thuoc khang sinh nao trong don nay.")
     else:
-        lines.extend(["", "Lưu ý: Không tự ý ngưng kháng sinh giữa chừng khi chưa hỏi bác sĩ."])
-    return "\n".join(lines), related
+        lines.append("")
+        lines.append("Luu y: Khong tu y ngung khang sinh giua chung khi chua hoi bac si.")
+    return JOIN(lines), related
 
-
-def _build_schedule_answer(medications: list) -> tuple[str, list]:
+def build_schedule(medications):
     related = []
-    lines = ["Lịch uống thuốc theo đơn đã xác nhận:"]
+    lines = ["Lich uong thuoc theo don da xac nhan:"]
     for med in medications:
         name = med.get("raw_name") or med.get("name", "Unknown")
-        dosage = med.get("dosage") or med.get("dose") or "1 viên"
+        dosage = med.get("dosage") or med.get("dose") or "1 vien"
         frequency = med.get("frequency") or med.get("schedule") or ""
         duration = med.get("duration") or ""
         related.append(name)
@@ -104,50 +91,49 @@ def _build_schedule_answer(medications: list) -> tuple[str, list]:
         if frequency:
             parts.append(frequency)
         if duration:
-            parts.append(f"trong {duration}")
-        lines.append(f"• {name}: {', '.join(parts)}")
+            parts.append("trong " + duration)
+        lines.append("- " + name + ": " + ", ".join(parts))
     if not related:
-        lines.append("Không có thông tin lịch uống trong đơn.")
-    return "\n".join(lines), related
+        lines.append("Khong co thong tin lich uong trong don.")
+    return JOIN(lines), related
 
-
-def _build_interaction_answer(medications: list) -> tuple[str, list]:
+def build_interaction(medications):
     related = []
-    lines = ["Về tương tác thuốc trong đơn:"]
-    high_risk = [m.get("raw_name") or m.get("name", "Unknown") for m in medications if m.get("risk_level") == "high"]
-    if high_risk:
-        related.extend(high_risk)
-        lines.append(f"Các thuốc cần lưu ý: {', '.join(high_risk)}")
+    lines = ["Ve tuong tac thuoc trong don:"]
+    high_risk_names = []
+    for m in medications:
+        if m.get("risk_level") == "high":
+            name = m.get("raw_name") or m.get("name", "Unknown")
+            high_risk_names.append(name)
+            related.append(name)
+    if high_risk_names:
+        lines.append("Cac thuoc can luu y: " + ", ".join(high_risk_names))
     else:
-        lines.append("Chưa phát hiện thuốc nguy cơ cao trong đơn.")
-    lines.extend(["", "Mình chưa đủ dữ liệu khẳng định tương tác thuốc đầy đủ. Hãy hỏi dược sĩ/bác sĩ."])
-    return "\n".join(lines), related
+        lines.append("Chua phat hien thuoc nguy co cao trong don.")
+    lines.append("")
+    lines.append("Minh chua du du lieu khang dinh tuong tac thuoc day du. Hay hoi duoc si/bac si.")
+    return JOIN(lines), related
 
-
-def _build_general_answer(medications: list) -> tuple[str, list]:
+def build_general(medications):
     related = []
-    lines = ["Tóm tắt các thuốc trong đơn đã xác nhận:"]
+    lines = ["Tom tat cac thuoc trong don da xac nhan:"]
     for med in medications:
         name = med.get("raw_name") or med.get("name", "Unknown")
         related.append(name)
         cat = med.get("category_vi") or ""
-        lines.append(f"• {name}{f' ({cat})' if cat else ''}")
-    lines.extend(["", "Bạn có thể hỏi tôi về:", "• Công dụng", "• Kháng sinh", "• Buồn ngủ", "• Lịch uống"])
-    return "\n".join(lines), related
+        if cat:
+            lines.append("- " + name + " (" + cat + ")")
+        else:
+            lines.append("- " + name)
+    lines.append("")
+    lines.append("Ban co the hoi toi ve:")
+    lines.append("- Cong dung")
+    lines.append("- Khang sinh")
+    lines.append("- Buon ngu")
+    lines.append("- Lich uong")
+    return JOIN(lines), related
 
-
-# ---------------------------------------------------------------------------
-# Main node
-# ---------------------------------------------------------------------------
-
-async def build_answer(state: dict) -> dict:
-    """
-    Route to the right answer builder based on state['intent'].
-
-    Falls back to LLM (agent.answer_medication_question) when intent='llm_fallback'.
-    Returns state with answer, quick_replies, risk_level, related_medications.
-    """
-    # Already answered (dangerous request path)
+async def build_answer(state):
     if state.get("is_dangerous"):
         return state
 
@@ -155,45 +141,46 @@ async def build_answer(state: dict) -> dict:
     medications = state.get("medications", [])
 
     if intent == "uses":
-        answer, related = _build_uses_answer(medications)
+        answer, related = build_uses(medications)
         risk_level = "low"
     elif intent == "drowsiness":
-        answer, related = _build_drowsiness_answer(medications)
+        answer, related = build_drowsiness(medications)
         risk_level = "medium"
     elif intent == "antibiotic":
-        answer, related = _build_antibiotic_answer(medications)
+        answer, related = build_antibiotic(medications)
         risk_level = "medium"
     elif intent == "schedule":
-        answer, related = _build_schedule_answer(medications)
+        answer, related = build_schedule(medications)
         risk_level = "low"
     elif intent == "dose_change":
-        answer = (
-            "Bạn không nên tự ý tăng/giảm liều, ngưng hoặc thay thuốc. "
-            "Nếu có tác dụng phụ hoặc muốn đổi thuốc, hãy hỏi bác sĩ/dược sĩ."
-        )
-        related = [m.get("raw_name") or m.get("name", "") for m in medications]
+        answer = "Ban khong nen tu y tang/giam lieu, ngung hoac thay thuoc. Neu co tac dung phu hoac muon doi thuoc, hay hoi bac si/duoc si."
+        related = []
+        for m in medications:
+            name = m.get("raw_name") or m.get("name", "")
+            if name:
+                related.append(name)
         risk_level = "high"
     elif intent == "interaction":
-        answer, related = _build_interaction_answer(medications)
+        answer, related = build_interaction(medications)
         risk_level = "medium"
     elif intent == "llm_fallback":
-        from ..agent import answer_medication_question
-        from ..services.prescription_store import get_prescription
-        prescription = get_prescription(state.get("prescription_id", "")) or {}
+        from app.agent import answer_medication_question
+        from app.services.prescription_store import get_prescription
+        prescription = get_prescription(state.get("prescription_id") or "") or {}
         result = answer_medication_question(
             prescription=prescription,
-            message=state.get("question", ""),
-            history=state.get("history", []),
+            message=state.get("question") or "",
+            history=state.get("history") or [],
         )
         return {
             **state,
-            "answer": result.get("answer", ""),
-            "quick_replies": result.get("quickReplies", MEDICATION_QUICK_REPLIES),
+            "answer": result.get("answer") or "",
+            "quick_replies": result.get("quickReplies") or MEDICATION_QUICK_REPLIES,
             "risk_level": "low",
             "related_medications": [],
         }
     else:
-        answer, related = _build_general_answer(medications)
+        answer, related = build_general(medications)
         risk_level = "low"
 
     return {

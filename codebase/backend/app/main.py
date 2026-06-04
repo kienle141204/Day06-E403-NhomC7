@@ -1,5 +1,4 @@
 """FastAPI application — thin HTTP adapter. All business logic lives in LangGraph graphs."""
-import os
 import uuid
 from copy import deepcopy
 from typing import Optional
@@ -31,10 +30,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# In-memory prescription + chat session stores
-prescriptions: dict[str, dict] = {}
-chat_sessions: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -90,22 +85,11 @@ class AppointmentRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _get_prescription_or_404(prescription_id: str) -> dict:
-    p = prescriptions.get(prescription_id)
+    """Get prescription from store or raise 404."""
+    p = get_prescription(prescription_id)
     if not p:
         raise HTTPException(status_code=404, detail="Prescription not found.")
     return p
-
-
-def _get_chat_session(session_id: str, prescription_id: str) -> dict:
-    session = chat_sessions.setdefault(
-        session_id, {"prescriptionId": prescription_id, "history": []}
-    )
-    if session["prescriptionId"] != prescription_id:
-        raise HTTPException(
-            status_code=409,
-            detail="This chat session is already locked to another prescription.",
-        )
-    return session
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +109,6 @@ async def scan_prescription(file: UploadFile = File(...)):
     """
     prescription = await scan_prescription_upload(file)
     prescription_id = prescription["prescriptionId"]
-    prescriptions[prescription_id] = prescription
     save_extracted(prescription_id, prescription.get("medications", []))
     return deepcopy(prescription)
 
@@ -187,7 +170,7 @@ async def update_medication(prescription_id: str, medication_id: str, patch: Med
 @app.post("/chat")
 async def chat(request: ChatRequest):
     """
-    Q&A turn for an confirmed prescription.
+    Q&A turn for a confirmed prescription.
     chat_graph: guard_dangerous_request → detect_intent → build_answer → append_history
     """
     prescription_id = request.prescription_id
@@ -196,20 +179,17 @@ async def chat(request: ChatRequest):
     if not prescription_id or not question:
         raise HTTPException(status_code=400, detail="prescriptionId and message are required.")
 
-    session = _get_chat_session(prescription_id, prescription_id)
-    prescription = get_prescription(prescription_id) or _get_prescription_or_404(prescription_id)
+    prescription = _get_prescription_or_404(prescription_id)
     medications = prescription.get("medications", [])
 
     state = await chat_graph.ainvoke({
         "prescription_id": prescription_id,
         "question": question,
         "session_id": prescription_id,
-        "history": list(session.get("history", [])),
+        "history": [],
         "medications": medications,
         "errors": [],
     })
-
-    session["history"] = state.get("history", session["history"])
 
     return ChatResponseFrontend(
         answer=state.get("answer", ""),

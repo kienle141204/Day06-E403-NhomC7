@@ -1,6 +1,6 @@
 """Chat node: detect and short-circuit dangerous medical requests."""
-from ..agent import is_dangerous_request
-from ..prompts import DANGEROUS_REQUEST_ANSWER, MEDICATION_QUICK_REPLIES
+from app.services.safety_service import is_dangerous_request
+from app.prompts import DANGEROUS_REQUEST_ANSWER, MEDICATION_QUICK_REPLIES
 
 
 async def guard_dangerous_request(state: dict) -> dict:
