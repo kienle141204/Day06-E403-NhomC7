@@ -1,4 +1,5 @@
 """Chat node: build the answer based on detected intent."""
+import json
 import re
 
 from ..prompts import MEDICATION_QUICK_REPLIES
@@ -214,19 +215,54 @@ async def build_answer(state: dict) -> dict:
     mentioned = state.get("mentioned_drug")
     medications = [mentioned] if mentioned else all_medications
 
+    def _build_drug_context(drug: dict | None, all_meds: list) -> str | None:
+        """
+        Format internal DB data for a specific drug (or all meds) as a
+        readable string the LLM can use to give precise answers.
+        """
+        targets = [drug] if drug else all_meds
+        if not targets:
+            return None
+
+        entries = []
+        for med in targets:
+            entry = {
+                "ten_thuoc": med.get("raw_name") or med.get("name"),
+                "hoat_chat_viet": med.get("ingredient_vi"),
+                "hoat_chat_anh": med.get("ingredient_en"),
+                "nhom_thuoc": med.get("category_vi"),
+                "cong_dung": med.get("uses_vi") or [],
+                "luu_y_quan_trong": med.get("important_notes_vi") or [],
+                "lieu_dung_tu_don": {
+                    "lieu": med.get("dose"),
+                    "lich": med.get("schedule"),
+                    "thoi_gian": med.get("duration"),
+                },
+                "muc_do_rui_ro": med.get("risk_level", "low"),
+                "canh_bao_an_toan": med.get("safety_flags") or [],
+                "da_tim_thay_trong_co_so_du_lieu": med.get("found", False),
+            }
+            # Remove None / empty values to keep context compact
+            entry = {k: v for k, v in entry.items() if v not in (None, [], {})}
+            entries.append(entry)
+
+        return json.dumps(entries, ensure_ascii=False, indent=2)
+
     def _llm_fallback(fallback_answer: str = "", fallback_related: list | None = None) -> dict:
         """
-        Call LLM agent. If LLM is unavailable or fails, return fallback_answer
-        instead of crashing — keeps the chat alive even without an API key.
+        Call LLM agent with enriched internal drug data as context.
+        If LLM is unavailable or fails, return fallback_answer instead of crashing.
         """
         from ..agent import answer_medication_question
         from ..services.prescription_store import get_prescription
         try:
             prescription = get_prescription(state.get("prescription_id", "")) or {}
+            drug_context = _build_drug_context(state.get("mentioned_drug"), all_medications)
             result = answer_medication_question(
                 prescription=prescription,
                 message=state.get("question", ""),
                 history=state.get("history", []),
+                drug_context=drug_context,
             )
             return {
                 **state,

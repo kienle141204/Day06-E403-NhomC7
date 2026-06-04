@@ -38,3 +38,13 @@ MEDICATION_QUICK_REPLIES = [
     "Tac dung phu can luu y",
     "Can luu y tuong tac gi?",
 ]
+
+DRUG_INTERNAL_CONTEXT_TEMPLATE = """
+Du lieu thuoc tra cuu duoc tu co so du lieu noi bo (su dung de tra loi chinh xac hon):
+{drug_data}
+""".strip()
+
+SAFETY_NOTICE = (
+    "Thong tin chi mang tinh tham khao, khong thay the tu van cua bac si/duoc si. "
+    "Khong tu y thay doi lieu, ngung thuoc hoac dung thuoc ke don khi chua co chi dinh."
+)
