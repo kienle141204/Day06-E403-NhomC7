@@ -27,7 +27,7 @@ def analyze_prescription(prescription_id: str) -> Dict[str, Any]:
     for med in confirmed_meds:
         # Resolve drug from local database
         resolved = drug_service.resolve_to_medication_dict(
-            raw_name=med.get("raw_name", ""),
+            raw_name=med.get("raw_name") or med.get("name", ""),
             dosage=med.get("dosage"),
             frequency=med.get("frequency"),
             duration=med.get("duration")
