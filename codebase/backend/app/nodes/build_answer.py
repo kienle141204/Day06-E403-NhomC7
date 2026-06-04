@@ -113,18 +113,24 @@ def _build_schedule_answer(medications: list) -> tuple[str, list]:
     return "\n".join(lines), related
 
 
-def _build_side_effects_answer(medications: list) -> tuple[str, list | None]:
+def _build_side_effects_answer(medications: list) -> tuple[str, list, bool]:
     """
-    Build side effects answer from important_notes_vi in medication data.
-    Returns (answer, related) or (answer, None) when data is insufficient
-    so build_answer can fall back to LLM.
+    Build side effects answer from medication data.
+
+    Uses important_notes_vi when available; falls back to risk classification
+    (safety_flags, risk_level) so the caller always gets a meaningful answer
+    even when detailed side-effects text is not in the local DB.
+
+    Returns: (answer, related_names, needs_llm)
+      needs_llm=True only when the drug was not found at all in the local DB,
+      meaning we have zero structured info and LLM would give a better answer.
     """
     related = []
     lines = []
-    has_data = False
+    needs_llm = False
 
     header = (
-        f"Tác dụng phụ của {medications[0].get('raw_name') or medications[0].get('name')}:"
+        f"Tác dụng phụ cần lưu ý của {medications[0].get('raw_name') or medications[0].get('name')}:"
         if len(medications) == 1
         else "Tác dụng phụ cần lưu ý:"
     )
@@ -133,22 +139,28 @@ def _build_side_effects_answer(medications: list) -> tuple[str, list | None]:
     for med in medications:
         name = med.get("raw_name") or med.get("name", "Unknown")
         notes = [n for n in (med.get("important_notes_vi") or []) if n]
+        flags = [f for f in (med.get("safety_flags") or []) if f]
+        risk  = med.get("risk_level", "low")
         related.append(name)
 
         if notes:
-            has_data = True
             lines.append(f"• {name}: {'; '.join(notes)}")
+        elif flags:
+            # Use safety classification as fallback
+            lines.append(f"• {name}: {'; '.join(flags)}")
         elif med.get("found"):
-            lines.append(f"• {name}: Chưa có thông tin tác dụng phụ trong cơ sở dữ liệu.")
+            # Found in DB but no side-effects text — give risk-level hint
+            risk_label = {"high": "nguy cơ cao", "medium": "cần theo dõi", "low": "nhìn chung an toàn khi dùng đúng liều"}.get(risk, "chưa rõ")
+            lines.append(f"• {name}: Cơ sở dữ liệu chưa có chi tiết tác dụng phụ, phân loại {risk_label}. Hỏi dược sĩ/bác sĩ để biết thêm.")
         else:
-            lines.append(f"• {name}: Không tìm thấy trong cơ sở dữ liệu, cần hỏi dược sĩ/bác sĩ.")
+            # Not found at all → only LLM can help
+            needs_llm = True
+            lines.append(f"• {name}: Không tìm thấy trong cơ sở dữ liệu nội bộ.")
 
-    if not has_data:
-        # Signal to build_answer to use LLM instead
-        return "\n".join(lines), None
+    if not needs_llm:
+        lines.extend(["", "Nếu gặp tác dụng phụ bất thường, hãy ngừng thuốc và liên hệ bác sĩ/dược sĩ ngay."])
 
-    lines.extend(["", "Nếu gặp bất kỳ tác dụng phụ bất thường nào, hãy ngừng thuốc và liên hệ bác sĩ/dược sĩ ngay."])
-    return "\n".join(lines), related
+    return "\n".join(lines), related, needs_llm
 
 
 def _build_interaction_answer(medications: list) -> tuple[str, list]:
@@ -202,28 +214,46 @@ async def build_answer(state: dict) -> dict:
     mentioned = state.get("mentioned_drug")
     medications = [mentioned] if mentioned else all_medications
 
-    def _llm_fallback() -> dict:
+    def _llm_fallback(fallback_answer: str = "", fallback_related: list | None = None) -> dict:
+        """
+        Call LLM agent. If LLM is unavailable or fails, return fallback_answer
+        instead of crashing — keeps the chat alive even without an API key.
+        """
         from ..agent import answer_medication_question
         from ..services.prescription_store import get_prescription
-        prescription = get_prescription(state.get("prescription_id", "")) or {}
-        result = answer_medication_question(
-            prescription=prescription,
-            message=state.get("question", ""),
-            history=state.get("history", []),
-        )
-        return {
-            **state,
-            "answer": result.get("answer", ""),
-            "quick_replies": result.get("quickReplies", MEDICATION_QUICK_REPLIES),
-            "risk_level": "low",
-            "related_medications": [],
-        }
+        try:
+            prescription = get_prescription(state.get("prescription_id", "")) or {}
+            result = answer_medication_question(
+                prescription=prescription,
+                message=state.get("question", ""),
+                history=state.get("history", []),
+            )
+            return {
+                **state,
+                "answer": result.get("answer", ""),
+                "quick_replies": result.get("quickReplies", MEDICATION_QUICK_REPLIES),
+                "risk_level": "low",
+                "related_medications": fallback_related or [],
+            }
+        except Exception:
+            # LLM unavailable — return whatever partial answer we already have
+            answer = fallback_answer or (
+                "Xin lỗi, mình chưa đủ dữ liệu để trả lời câu hỏi này. "
+                "Vui lòng hỏi trực tiếp dược sĩ hoặc bác sĩ kê đơn."
+            )
+            return {
+                **state,
+                "answer": answer,
+                "quick_replies": MEDICATION_QUICK_REPLIES,
+                "risk_level": "low",
+                "related_medications": fallback_related or [],
+            }
 
     if intent == "side_effects":
-        answer, related = _build_side_effects_answer(medications)
-        if related is None:
-            # No structured data in DB → LLM gives a better answer
-            return _llm_fallback()
+        answer, related, needs_llm = _build_side_effects_answer(medications)
+        if needs_llm:
+            # Drug not in local DB at all → LLM, with structured partial as fallback
+            return _llm_fallback(fallback_answer=answer, fallback_related=related)
         risk_level = "medium"
     elif intent == "uses":
         answer, related = _build_uses_answer(medications)
