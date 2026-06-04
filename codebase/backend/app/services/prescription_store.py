@@ -28,6 +28,14 @@ def save_analysis(prescription_id: str, analysis: dict):
         PRESCRIPTIONS[prescription_id]["analysis"] = analysis
 
 
+def save_enriched(prescription_id: str, enriched_medications: list):
+    """Save enriched medications produced by confirm_graph."""
+    if prescription_id in PRESCRIPTIONS:
+        PRESCRIPTIONS[prescription_id]["status"] = "confirmed"
+        PRESCRIPTIONS[prescription_id]["confirmed_medications"] = enriched_medications
+        PRESCRIPTIONS[prescription_id]["medications"] = enriched_medications
+
+
 def get_prescription(prescription_id: str) -> Optional[dict]:
     """Get prescription by ID."""
     return PRESCRIPTIONS.get(prescription_id)
