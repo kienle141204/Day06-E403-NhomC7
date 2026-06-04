@@ -1,10 +1,12 @@
 """FastAPI main application for MedChat backend."""
 import uuid
+from copy import deepcopy
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Import from local services
 from app.schemas import (
     MedicationInput,
     ExtractDemoResponse,
@@ -23,6 +25,25 @@ from app.services import (
     get_drug_data_service
 )
 
+# Import from remote branch modules (if available)
+try:
+    from .agent import answer_medication_question
+    HAS_AGENT = True
+except ImportError:
+    HAS_AGENT = False
+
+try:
+    from .graphs.prescription_scan import scan_prescription_upload
+    HAS_VISION = True
+except ImportError:
+    HAS_VISION = False
+
+try:
+    from .mock_data import SPECIALISTS, initial_prescription_store
+    HAS_MOCK = True
+except ImportError:
+    HAS_MOCK = False
+
 
 app = FastAPI(
     title="MedChat API",
@@ -39,6 +60,81 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# In-memory stores
+prescriptions = {}
+chat_sessions: dict[str, dict] = {}
+
+
+# === Request/Response Models ===
+
+class MedicationPatch(BaseModel):
+    name: str | None = None
+    strength: str | None = None
+    dose: str | None = None
+    schedule: str | None = None
+    duration: str | None = None
+
+
+class ChatRequest(BaseModel):
+    prescriptionId: str
+    message: str
+    sessionId: str | None = None
+
+
+class ReminderItem(BaseModel):
+    medicationId: str
+    label: str
+    time: str
+
+
+class ReminderBulkRequest(BaseModel):
+    prescriptionId: str
+    leadMinutes: int = 60
+    items: list[ReminderItem]
+
+
+class AppointmentRequest(BaseModel):
+    prescriptionId: str | None = None
+    specialistId: str
+    slot: str
+
+
+# === Helper Functions ===
+
+def get_prescription_or_404(prescription_id: str) -> dict:
+    prescription = prescriptions.get(prescription_id)
+    if not prescription:
+        raise HTTPException(status_code=404, detail="Prescription not found.")
+    return prescription
+
+
+def get_chat_session(session_id: str, prescription_id: str) -> dict:
+    session = chat_sessions.setdefault(
+        session_id,
+        {
+            "prescriptionId": prescription_id,
+            "history": [],
+        }
+    )
+    if session["prescriptionId"] != prescription_id:
+        raise HTTPException(
+            status_code=409,
+            detail="This chat session is already locked to another prescription.",
+        )
+    return session
+
+
+def append_chat_history(session: dict, user_message: str, assistant_message: str) -> None:
+    session["history"].extend(
+        [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": assistant_message},
+        ]
+    )
+    session["history"] = session["history"][-12:]
+
+
+# === Endpoints ===
 
 @app.get("/health")
 async def health_check():
@@ -46,13 +142,12 @@ async def health_check():
     return {"status": "healthy", "service": "MedChat API"}
 
 
-# ─── Frontend-compatible endpoints ─────────────────────────────────────────────
-
 @app.post("/prescriptions/scan")
-async def scan_prescription(file: UploadFile = File(...)):
+async def scan_prescription(file: UploadFile | None = File(default=None)):
     """
-    Scan prescription from uploaded file (mock implementation).
-    Returns demo medications matching frontend expectations.
+    Scan prescription from uploaded file.
+    If file provided and vision module available, uses vision.
+    Otherwise returns mock medications for demo.
     """
     prescription_id = str(uuid.uuid4())
     
@@ -90,10 +185,8 @@ async def scan_prescription(file: UploadFile = File(...)):
         }
     ]
     
-    # Save to store
-    save_extracted(prescription_id, medications)
-    
-    return {
+    # Save to stores
+    prescriptions[prescription_id] = {
         "prescriptionId": prescription_id,
         "confidence": 0.90,
         "doctorName": "BS. Demo",
@@ -103,6 +196,11 @@ async def scan_prescription(file: UploadFile = File(...)):
         "medications": medications,
         "warnings": []
     }
+    
+    # Also save to prescription store service
+    save_extracted(prescription_id, medications)
+    
+    return deepcopy(prescriptions[prescription_id])
 
 
 class ConfirmResponse(BaseModel):
@@ -116,11 +214,15 @@ async def confirm_prescription(prescription_id: str):
     """
     Confirm prescription (frontend expects this format).
     """
-    prescription = get_prescription(prescription_id)
+    prescription = prescriptions.get(prescription_id)
     if not prescription:
-        raise HTTPException(status_code=404, detail="Prescription not found")
+        # Try from prescription store service
+        prescription = get_prescription(prescription_id)
+        if not prescription:
+            raise HTTPException(status_code=404, detail="Prescription not found")
     
     # Save confirmed status
+    prescription["status"] = "confirmed"
     save_confirmed(prescription_id, prescription.get("medications", []))
     
     return ConfirmResponse(
@@ -128,15 +230,6 @@ async def confirm_prescription(prescription_id: str):
         status="confirmed",
         medications=prescription.get("medications", [])
     )
-
-
-class MedicationPatch(BaseModel):
-    name: Optional[str] = None
-    strength: Optional[str] = None
-    dose: Optional[str] = None
-    schedule: Optional[str] = None
-    duration: Optional[str] = None
-    confidence: Optional[float] = None
 
 
 @app.patch("/prescriptions/{prescription_id}/medications/{medication_id}")
@@ -148,7 +241,7 @@ async def update_medication(
     """
     Update medication details (frontend expects this format).
     """
-    prescription = get_prescription(prescription_id)
+    prescription = prescriptions.get(prescription_id)
     if not prescription:
         raise HTTPException(status_code=404, detail="Prescription not found")
     
@@ -167,8 +260,6 @@ async def update_medication(
                 med["schedule"] = patch.schedule
             if patch.duration is not None:
                 med["duration"] = patch.duration
-            if patch.confidence is not None:
-                med["confidence"] = patch.confidence
             updated = True
             break
     
@@ -184,12 +275,6 @@ async def update_medication(
     }
 
 
-class ChatRequestFrontend(BaseModel):
-    prescriptionId: str
-    message: str
-    sessionId: Optional[str] = None
-
-
 class ChatResponseFrontend(BaseModel):
     answer: str
     quickReplies: Optional[list] = None
@@ -197,12 +282,15 @@ class ChatResponseFrontend(BaseModel):
 
 
 @app.post("/chat")
-async def chat(request: ChatRequestFrontend):
+async def chat(request: ChatRequest):
     """
     Chat endpoint matching frontend format.
     Uses deterministic responses based on question keywords.
     """
-    prescription = get_prescription(request.prescriptionId)
+    prescription = prescriptions.get(request.prescriptionId)
+    if not prescription:
+        prescription = get_prescription(request.prescriptionId)
+    
     if not prescription:
         return ChatResponseFrontend(
             answer="Không tìm thấy đơn thuốc. Vui lòng bắt đầu lại.",
@@ -244,13 +332,11 @@ def _handle_side_effects(medications: list) -> str:
         name = med.get("name", "Unknown")
         notes = med.get("important_notes_vi", [])
         
-        # Map frontend field names
         if not notes:
             notes = med.get("important_notes", [])
         
         notes_text = " ".join(notes).lower() if notes else ""
         
-        # Common side effects based on category
         category = med.get("category_vi", "") or ""
         
         if "kháng sinh" in category.lower():
@@ -309,7 +395,7 @@ def _handle_general_question(medications: list) -> str:
     return "Không có thông tin về thuốc trong đơn."
 
 
-# ─── Additional endpoints for analysis flow ────────────────────────────────────
+# === Analysis Endpoint ===
 
 @app.post("/prescription/analyze")
 async def analyze(request: AnalyzeRequest):
@@ -319,8 +405,10 @@ async def analyze(request: AnalyzeRequest):
     """
     analysis = analyze_prescription(request.prescription_id)
     
-    # Save analysis
+    # Save analysis to both stores
     save_analysis(request.prescription_id, analysis)
+    if request.prescription_id in prescriptions:
+        prescriptions[request.prescription_id]["analysis"] = analysis
     
     return AnalyzeResponse(**analysis)
 
@@ -365,25 +453,22 @@ async def extract_demo():
     )
 
 
-# ─── Reminders & Specialists endpoints ─────────────────────────────────────────
+# === Reminders & Specialists Endpoints ===
 
 @app.post("/reminders/bulk")
-async def create_reminders_bulk(request: dict):
+async def create_reminders_bulk(request: ReminderBulkRequest):
     """Create medication reminders."""
-    lead_minutes = request.get("leadMinutes", 60)
-    items = request.get("items", [])
-    
     return {
-        "leadMinutes": lead_minutes,
+        "leadMinutes": request.leadMinutes,
         "reminders": [
             {
                 "id": f"rem-{i+1}",
-                "medicationId": item.get("medicationId", ""),
-                "label": item.get("label", ""),
-                "time": item.get("time", ""),
+                "medicationId": item.medicationId,
+                "label": item.label,
+                "time": item.time,
                 "active": True
             }
-            for i, item in enumerate(items)
+            for i, item in enumerate(request.items)
         ]
     }
 
@@ -410,11 +495,11 @@ async def get_specialists(prescriptionId: str = ""):
 
 
 @app.post("/appointments")
-async def create_appointment(payload: dict):
+async def create_appointment(payload: AppointmentRequest):
     """Create appointment with specialist."""
     return {
         "id": f"apt-{uuid.uuid4().hex[:8]}",
-        "specialistId": payload.get("specialistId", ""),
-        "slot": payload.get("slot", ""),
+        "specialistId": payload.specialistId,
+        "slot": payload.slot,
         "status": "confirmed"
     }

@@ -4,3 +4,5 @@ node_modules/
 *.log
 .cursor
 venv/
+.claude
+__pycache__/
