@@ -36,7 +36,8 @@ def _norm(text: str) -> str:
 
 def _build_uses_answer(medications: list) -> tuple[str, list]:
     related = []
-    lines = ["Công dụng của các thuốc trong đơn:"]
+    header = f"Công dụng của {medications[0].get('raw_name') or medications[0].get('name')}:" if len(medications) == 1 else "Công dụng của các thuốc trong đơn:"
+    lines = [header]
     for med in medications:
         name = med.get("raw_name") or med.get("name", "Unknown")
         uses = med.get("uses_vi") or []
@@ -93,7 +94,8 @@ def _build_antibiotic_answer(medications: list) -> tuple[str, list]:
 
 def _build_schedule_answer(medications: list) -> tuple[str, list]:
     related = []
-    lines = ["Lịch uống thuốc theo đơn đã xác nhận:"]
+    header = f"Lịch uống {medications[0].get('raw_name') or medications[0].get('name')}:" if len(medications) == 1 else "Lịch uống thuốc theo đơn đã xác nhận:"
+    lines = [header]
     for med in medications:
         name = med.get("raw_name") or med.get("name", "Unknown")
         dosage = med.get("dosage") or med.get("dose") or "1 viên"
@@ -108,6 +110,44 @@ def _build_schedule_answer(medications: list) -> tuple[str, list]:
         lines.append(f"• {name}: {', '.join(parts)}")
     if not related:
         lines.append("Không có thông tin lịch uống trong đơn.")
+    return "\n".join(lines), related
+
+
+def _build_side_effects_answer(medications: list) -> tuple[str, list | None]:
+    """
+    Build side effects answer from important_notes_vi in medication data.
+    Returns (answer, related) or (answer, None) when data is insufficient
+    so build_answer can fall back to LLM.
+    """
+    related = []
+    lines = []
+    has_data = False
+
+    header = (
+        f"Tác dụng phụ của {medications[0].get('raw_name') or medications[0].get('name')}:"
+        if len(medications) == 1
+        else "Tác dụng phụ cần lưu ý:"
+    )
+    lines.append(header)
+
+    for med in medications:
+        name = med.get("raw_name") or med.get("name", "Unknown")
+        notes = [n for n in (med.get("important_notes_vi") or []) if n]
+        related.append(name)
+
+        if notes:
+            has_data = True
+            lines.append(f"• {name}: {'; '.join(notes)}")
+        elif med.get("found"):
+            lines.append(f"• {name}: Chưa có thông tin tác dụng phụ trong cơ sở dữ liệu.")
+        else:
+            lines.append(f"• {name}: Không tìm thấy trong cơ sở dữ liệu, cần hỏi dược sĩ/bác sĩ.")
+
+    if not has_data:
+        # Signal to build_answer to use LLM instead
+        return "\n".join(lines), None
+
+    lines.extend(["", "Nếu gặp bất kỳ tác dụng phụ bất thường nào, hãy ngừng thuốc và liên hệ bác sĩ/dược sĩ ngay."])
     return "\n".join(lines), related
 
 
@@ -144,6 +184,10 @@ async def build_answer(state: dict) -> dict:
     """
     Route to the right answer builder based on state['intent'].
 
+    When 'mentioned_drug' is set (user asked about a specific drug), the builder
+    receives only that one medication instead of the full list — preventing repeated
+    identical answers across turns.
+
     Falls back to LLM (agent.answer_medication_question) when intent='llm_fallback'.
     Returns state with answer, quick_replies, risk_level, related_medications.
     """
@@ -152,9 +196,36 @@ async def build_answer(state: dict) -> dict:
         return state
 
     intent = state.get("intent", "llm_fallback")
-    medications = state.get("medications", [])
+    all_medications = state.get("medications", [])
 
-    if intent == "uses":
+    # Narrow scope to the specific drug if user named one
+    mentioned = state.get("mentioned_drug")
+    medications = [mentioned] if mentioned else all_medications
+
+    def _llm_fallback() -> dict:
+        from ..agent import answer_medication_question
+        from ..services.prescription_store import get_prescription
+        prescription = get_prescription(state.get("prescription_id", "")) or {}
+        result = answer_medication_question(
+            prescription=prescription,
+            message=state.get("question", ""),
+            history=state.get("history", []),
+        )
+        return {
+            **state,
+            "answer": result.get("answer", ""),
+            "quick_replies": result.get("quickReplies", MEDICATION_QUICK_REPLIES),
+            "risk_level": "low",
+            "related_medications": [],
+        }
+
+    if intent == "side_effects":
+        answer, related = _build_side_effects_answer(medications)
+        if related is None:
+            # No structured data in DB → LLM gives a better answer
+            return _llm_fallback()
+        risk_level = "medium"
+    elif intent == "uses":
         answer, related = _build_uses_answer(medications)
         risk_level = "low"
     elif intent == "drowsiness":
@@ -177,21 +248,7 @@ async def build_answer(state: dict) -> dict:
         answer, related = _build_interaction_answer(medications)
         risk_level = "medium"
     elif intent == "llm_fallback":
-        from ..agent import answer_medication_question
-        from ..services.prescription_store import get_prescription
-        prescription = get_prescription(state.get("prescription_id", "")) or {}
-        result = answer_medication_question(
-            prescription=prescription,
-            message=state.get("question", ""),
-            history=state.get("history", []),
-        )
-        return {
-            **state,
-            "answer": result.get("answer", ""),
-            "quick_replies": result.get("quickReplies", MEDICATION_QUICK_REPLIES),
-            "risk_level": "low",
-            "related_medications": [],
-        }
+        return _llm_fallback()
     else:
         answer, related = _build_general_answer(medications)
         risk_level = "low"

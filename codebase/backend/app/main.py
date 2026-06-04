@@ -219,6 +219,40 @@ async def chat(request: ChatRequest):
 
 
 # ---------------------------------------------------------------------------
+# Compatibility endpoint — called by App.jsx after confirm to get enriched drug info
+# ---------------------------------------------------------------------------
+
+class AnalyzeRequest(BaseModel):
+    prescription_id: str
+
+
+@app.post("/prescription/analyze")
+async def analyze_prescription(request: AnalyzeRequest):
+    """
+    Return enriched medication data for a confirmed prescription.
+
+    The confirm_graph already resolves and enriches all medications.
+    This endpoint just reads that stored result so the frontend can
+    merge category_vi, uses_vi, risk_level into its local state.
+    """
+    prescription = get_prescription(request.prescription_id)
+    if not prescription:
+        raise HTTPException(status_code=404, detail="Prescription not found.")
+
+    medications = prescription.get("medications") or prescription.get("confirmed_medications") or []
+    return {
+        "prescription_id": request.prescription_id,
+        "medications": medications,
+        "summary": f"Đơn thuốc có {len(medications)} thuốc.",
+        "high_risk_warnings": [
+            f"⚠️ {m.get('raw_name') or m.get('name')}: {', '.join(m.get('safety_flags', []))}"
+            for m in medications
+            if m.get("risk_level") == "high" and m.get("safety_flags")
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Stub endpoints (not graph-driven)
 # ---------------------------------------------------------------------------
 

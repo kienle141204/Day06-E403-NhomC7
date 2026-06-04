@@ -156,7 +156,7 @@ function App() {
       // Analyze to get drug info from local database
       let analysisData = null
       try {
-        const analyzeResponse = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000'}/prescription/analyze`, {
+        const analyzeResponse = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/prescription/analyze`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prescription_id: prescription.prescriptionId })

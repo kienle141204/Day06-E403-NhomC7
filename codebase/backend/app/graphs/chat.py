@@ -22,6 +22,7 @@ class ChatState(TypedDict, total=False):
     history: list[dict[str, str]]
     medications: list[dict[str, Any]]
     intent: str
+    mentioned_drug: dict[str, Any] | None   # set by detect_intent; None = general question
     is_dangerous: bool
     answer: str
     quick_replies: list[str]

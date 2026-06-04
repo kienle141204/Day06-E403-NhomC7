@@ -1,14 +1,31 @@
-"""Chat node: classify the user's question into a known intent."""
+"""Chat node: classify the user's question into a known intent.
+
+Also extracts `mentioned_drug` — the specific medication from the prescription
+that the user is asking about (if any). build_answer uses this to filter responses.
+"""
 import re
 
 INTENTS: dict[str, list[str]] = {
-    "uses": ["cong dung", "dung de lam gi", "tac dung", "co tac dung gi", "chi co tac dung", "lam gi"],
-    "drowsiness": ["buon ngu", "lai xe", "choang", "met", "drowsiness", "nga", "chong mat"],
+    # side_effects TRƯỚC uses để "tac dung phu" không bị "tac dung" của uses chặn trước
+    "side_effects": [
+        "tac dung phu", "phan ung phu", "side effect", "tac hai",
+        "co hai gi", "anh huong gi", "anh huong khong", "gay ra gi",
+        "nguy hiem khong", "can than gi",
+    ],
+    "uses": [
+        "cong dung", "dung de lam gi", "co tac dung gi", "co tac gi",
+        "thuoc gi", "la thuoc gi", "dieu tri gi", "tri gi", "chua gi",
+    ],
+    "drowsiness": ["buon ngu", "lai xe", "chong mat", "choang vang", "choang", "met moi"],
     "antibiotic": ["khang sinh", "antibiotic"],
-    "schedule": ["lich", "ngay may lan", "truoc an", "sau an", "gio uong", "luc nao uong"],
+    "schedule": [
+        "lich uong", "ngay may lan", "may lan mot ngay", "bao nhieu lan",
+        "truoc an", "sau an", "gio uong", "luc nao uong", "uong khi nao",
+        "uong the nao",
+    ],
     "dose_change": [
-        "tang lieu", "giam lieu", "gap doi", "ngung", "bo thuoc", "doi thuoc", "thay thuoc",
-        "tang giam", "them thuoc", "bot thuoc", "them lieu", "bot lieu",
+        "tang lieu", "giam lieu", "gap doi", "ngung thuoc", "bo thuoc",
+        "doi thuoc", "thay thuoc", "them thuoc", "bot thuoc", "them lieu", "bot lieu",
     ],
     "interaction": ["tuong tac", "uong chung", "ruou", "bia"],
 }
@@ -40,12 +57,58 @@ def _normalize(text: str) -> str:
     return " ".join(text.split())
 
 
+def _matches_keyword(keyword: str, padded_question: str) -> bool:
+    """
+    Whole-word / whole-phrase match.
+
+    Padding the question with spaces means ' keyword ' never matches
+    inside a longer word. E.g. 'nga' won't match inside 'ngay'.
+    """
+    return f" {keyword} " in padded_question
+
+
+def _extract_mentioned_drug(padded_question: str, medications: list) -> dict | None:
+    """
+    Check if the question mentions a specific drug from the prescription.
+
+    Uses whole-word matching on each token of the drug name (min 4 chars).
+    Returns the medication dict if found, None for general questions.
+    """
+    for med in medications:
+        full_name = med.get("raw_name") or med.get("name") or ""
+        ingredient = med.get("ingredient_vi") or med.get("ingredient_en") or ""
+        candidates = [full_name, ingredient]
+
+        for candidate in candidates:
+            for token in candidate.split():
+                token_norm = _normalize(token)
+                if len(token_norm) >= 4 and f" {token_norm} " in padded_question:
+                    return med
+
+    return None
+
+
 async def detect_intent(state: dict) -> dict:
-    """Classify the question into one of the known intents, or 'llm_fallback'."""
-    normalized = _normalize(state.get("question", ""))
+    """
+    Classify the question into one of the known intents, or 'llm_fallback'.
+
+    Uses whole-word matching so short tokens like 'nga' don't fire inside
+    unrelated words like 'ngay' (ngày).
+
+    Also sets 'mentioned_drug' to the specific medication dict if the user
+    named a drug from the prescription, or None for general questions.
+    """
+    question_norm = _normalize(state.get("question", ""))
+    # Pad with spaces so boundary checks work at start/end of string too
+    padded = f" {question_norm} "
+    medications = state.get("medications", [])
+
     intent = "llm_fallback"
     for name, keywords in INTENTS.items():
-        if any(kw in normalized for kw in keywords):
+        if any(_matches_keyword(kw, padded) for kw in keywords):
             intent = name
             break
-    return {**state, "intent": intent}
+
+    mentioned_drug = _extract_mentioned_drug(padded, medications)
+
+    return {**state, "intent": intent, "mentioned_drug": mentioned_drug}
