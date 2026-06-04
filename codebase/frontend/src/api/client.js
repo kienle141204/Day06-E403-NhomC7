@@ -11,7 +11,15 @@ async function request(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, options)
   if (!response.ok) {
     const detail = await response.text().catch(() => '')
-    throw new Error(detail || `API error ${response.status}`)
+    try {
+      const parsed = JSON.parse(detail)
+      throw new Error(parsed.detail || `API error ${response.status}`)
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        throw new Error(detail || `API error ${response.status}`)
+      }
+      throw err
+    }
   }
 
   if (response.status === 204) {
@@ -45,12 +53,12 @@ export const api = {
     return request(`/prescriptions/${prescriptionId}/confirm`, { method: 'POST' })
   },
 
-  async sendMessage(prescriptionId, message) {
-    if (!baseUrl) return mockApi.sendMessage(prescriptionId, message)
+  async sendMessage(prescriptionId, message, sessionId) {
+    if (!baseUrl) return mockApi.sendMessage(prescriptionId, message, sessionId)
     return request('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prescriptionId, message }),
+      body: JSON.stringify({ prescriptionId, message, sessionId }),
     })
   },
 
