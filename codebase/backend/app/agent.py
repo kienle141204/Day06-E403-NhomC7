@@ -8,6 +8,7 @@ from openai import OpenAI
 
 from .prompts import (
     DANGEROUS_REQUEST_ANSWER,
+    DRUG_INTERNAL_CONTEXT_TEMPLATE,
     EMPTY_ANSWER,
     MEDICATION_AGENT_PROMPT,
     MEDICATION_QUICK_REPLIES,
@@ -54,6 +55,7 @@ def build_prompt(
     prescription: dict,
     message: str,
     history: list[dict] | None = None,
+    drug_context: str | None = None,
 ) -> list[dict]:
     prescription_json = json.dumps(prescription, ensure_ascii=False, indent=2)
     messages = [
@@ -63,6 +65,13 @@ def build_prompt(
             "content": PRESCRIPTION_CONTEXT_TEMPLATE.format(prescription_json=prescription_json),
         },
     ]
+    # Inject internal DB data as a dedicated context block so the LLM has
+    # structured, human-readable drug info to draw from, not just raw JSON.
+    if drug_context:
+        messages.append({
+            "role": "user",
+            "content": DRUG_INTERNAL_CONTEXT_TEMPLATE.format(drug_data=drug_context),
+        })
     messages.extend(history or [])
     messages.append({"role": "user", "content": USER_MESSAGE_TEMPLATE.format(message=message)})
     return messages
@@ -72,6 +81,7 @@ def answer_medication_question(
     prescription: dict,
     message: str,
     history: list[dict] | None = None,
+    drug_context: str | None = None,
 ) -> dict:
     if is_dangerous_request(message):
         return {
@@ -92,7 +102,7 @@ def answer_medication_question(
     try:
         response = client.responses.create(
             model=model,
-            input=build_prompt(prescription, message, history),
+            input=build_prompt(prescription, message, history, drug_context),
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"OpenAI chat failed: {exc}") from exc
