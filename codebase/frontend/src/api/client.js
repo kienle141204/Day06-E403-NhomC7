@@ -64,12 +64,12 @@ export const api = {
     })
   },
 
-  async createReminders(prescriptionId, items, leadMinutes = 60) {
-    if (!baseUrl) return mockApi.createReminders(prescriptionId, items, leadMinutes)
-    return request('/reminders/bulk', {
+  async createReminders(prescriptionId, leadMinutes = 60) {
+    if (!baseUrl) return mockApi.createReminders(prescriptionId, leadMinutes)
+    return request(`/prescriptions/${encodeURIComponent(prescriptionId)}/reminders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prescriptionId, leadMinutes, items }),
+      body: JSON.stringify({ leadMinutes }),
     })
   },
 
