@@ -36,7 +36,6 @@ const navItems = [
   ['chat', 'Đọc đơn AI', true],
   ['file', 'Đơn của tôi', false],
   ['clock', 'Nhắc uống thuốc', false],
-  ['doctor', 'Tư vấn chuyên gia', false],
   ['map', 'Nhà thuốc gần đây', false],
 ]
 
@@ -45,6 +44,7 @@ function App() {
   const [messages, setMessages] = useState(initialMessages)
   const [quickReplies, setQuickReplies] = useState(['Tải ảnh đơn thuốc', 'Quy trình an toàn'])
   const [prescription, setPrescription] = useState(null)
+  const [chatSessionId, setChatSessionId] = useState('')
   const [reminders, setReminders] = useState([])
   const [specialists, setSpecialists] = useState([])
   const [appointment, setAppointment] = useState(null)
@@ -84,7 +84,17 @@ function App() {
     await runTask(async () => {
       addMessage('user', `Đã chọn tệp: ${file.name}`)
       const result = await api.scanPrescription(file)
+      const nextSessionId =
+        crypto.randomUUID?.() || `${result.prescriptionId}-${Date.now()}-${Math.random()}`
       setPrescription(result)
+      setChatSessionId(nextSessionId)
+      setReminders([])
+      setSpecialists([])
+      setAppointment(null)
+      setMessages([
+        ...initialMessages,
+        { id: `${Date.now()}-file`, role: 'user', text: `Đã chọn tệp: ${file.name}` },
+      ])
       setPanelOpen(true)
       addMessage(
         'assistant',
@@ -99,6 +109,15 @@ function App() {
 
   async function confirmPrescription() {
     if (!prescription) return
+    const unclearMeds = prescription.medications.filter((m) => m.confidence < 0.7)
+    if (unclearMeds.length > 0) {
+      addMessage(
+        'assistant',
+        `Còn ${unclearMeds.length} thuốc chưa được nhận dạng rõ ràng. Vui lòng nhấn "Sửa" và nhập đúng tên thuốc trước khi xác nhận.`,
+      )
+      setQuickReplies(['Có sai tên thuốc', 'Sửa thuốc khác'])
+      return
+    }
     await runTask(async () => {
       const result = await api.confirmPrescription(prescription.prescriptionId)
       setPrescription(result)
@@ -155,7 +174,7 @@ function App() {
       return
     }
 
-    if (normalized.includes('chuyen gia') || normalized.includes('bac si')) {
+    if (normalized.includes('dat lich')) {
       await loadSpecialists()
       return
     }
@@ -174,10 +193,22 @@ function App() {
       return
     }
 
+    if (highRisk) {
+      addMessage(
+        'assistant',
+        'Đơn thuốc này chứa thuốc có nguy cơ cao. Để đảm bảo an toàn, tôi không thể tư vấn trực tiếp. Vui lòng đặt lịch với bác sĩ.',
+      )
+      setQuickReplies(['Đặt lịch với bác sĩ', 'Xem cảnh báo'])
+      return
+    }
+
     setInput('')
     addMessage('user', trimmed)
     await runTask(async () => {
-      const result = await api.sendMessage(prescription.prescriptionId, trimmed)
+      const result = await api.sendMessage(prescription.prescriptionId, trimmed, chatSessionId)
+      if (result.sessionId && result.sessionId !== chatSessionId) {
+        setChatSessionId(result.sessionId)
+      }
       addMessage('assistant', result.answer)
       setQuickReplies(result.quickReplies || [])
     })
@@ -189,7 +220,7 @@ function App() {
       const result = await api.createReminders(prescription.prescriptionId, reminderDefaults, 60)
       setReminders(result.reminders)
       addMessage('assistant', `Đã tạo ${result.reminders.length} nhắc uống thuốc trước 60 phút.`)
-      setQuickReplies(['Tác dụng phụ?', 'Xem lịch chuyên gia'])
+      setQuickReplies(['Tác dụng phụ?', 'Lịch uống trong ngày'])
     })
   }
 
@@ -347,7 +378,7 @@ function ChatWindow({ messages, busy, highRisk }) {
           <strong className="block text-sm text-slate-950">
             {highRisk ? 'Đơn có thuốc cần theo dõi' : 'Xác nhận trước khi giải thích'}
           </strong>
-          <span className="mt-1 block text-sm text-slate-500">AI không thay thế bác sĩ hoặc dược sĩ của bạn.</span>
+          <span className="mt-1 block text-sm text-slate-500">AI chỉ giải thích thông tin thuốc trong đơn đã xác nhận.</span>
         </div>
       </div>
 
@@ -387,10 +418,35 @@ function MessageBubble({ message }) {
             : 'rounded-br-md bg-gradient-to-br from-blue-700 to-blue-600 text-white shadow-blue-200'
         }`}
       >
-        {message.text}
+        <FormattedMessage text={message.text} />
       </div>
     </div>
   )
+}
+
+function FormattedMessage({ text }) {
+  return (
+    <div className="whitespace-pre-wrap break-words">
+      {String(text)
+        .split('\n')
+        .map((line, lineIndex, lines) => (
+          <span key={`${line}-${lineIndex}`}>
+            {renderInlineMarkdown(line)}
+            {lineIndex < lines.length - 1 ? <br /> : null}
+          </span>
+        ))}
+    </div>
+  )
+}
+
+function renderInlineMarkdown(line) {
+  const parts = line.split(/(\*\*[^*]+\*\*)/g)
+  return parts.map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={`${part}-${index}`} className="font-bold">{part.slice(2, -2)}</strong>
+    }
+    return <span key={`${part}-${index}`}>{part}</span>
+  })
 }
 
 function QuickReplies({ items, onPick }) {
@@ -554,7 +610,7 @@ function PrescriptionPanel(props) {
                 Tạo nhắc
               </button>
               <button type="button" className="h-11 rounded-xl border border-blue-200 bg-white text-sm font-bold text-blue-800" onClick={loadSpecialists} disabled={busy}>
-                Lịch chuyên gia
+                Đặt lịch tư vấn riêng
               </button>
             </div>
 
