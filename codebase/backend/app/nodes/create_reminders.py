@@ -135,16 +135,44 @@ async def create_reminders(state: dict) -> dict:
     """Generate reminder items from a processed prescription state."""
     prescription = state.get("prescription") or {}
     medications = prescription.get("medications", [])
-
     reminders: list[dict[str, str]] = []
     for med in medications:
+        # Fallback parsing: sometimes vision model merges schedule/duration into the dose field.
+        raw_dose = (med.get("dose") or med.get("dosage") or "").strip()
+        schedule_str = (med.get("schedule") or med.get("notes") or "").strip()
+
+        # If schedule is missing but dose contains scheduling keywords, try to extract them.
+        if raw_dose and not schedule_str:
+            # Try to extract duration e.g. "trong 7 ngày"
+            duration_match = re.search(r"trong\s+\d+\s*(?:ngày|tháng|tuần)|hết\s+khi\s+kết\s+thúc", raw_dose, re.IGNORECASE)
+            if duration_match:
+                schedule_str += (" " + duration_match.group(0)).strip()
+                raw_dose = raw_dose.replace(duration_match.group(0), "")
+
+            # Try to extract schedule patterns
+            schedule_match = re.search(
+                r"(ngày\s*\d+\s*lần|\d+\s*-\s*\d+\s*lần|buổi\s+sáng(?:\s+trước\s+ăn(?:\s*\d+\s*phút)?)?|buổi\s+tối|buổi\s+trưa|trước\s+ăn|sau\s+ăn|trước\s+khi\s+ngủ|khi\s+cần|cách\s+nhau\s+ít\s+nhất\s+\d+\s*giờ)",
+                raw_dose,
+                re.IGNORECASE,
+            )
+            if schedule_match:
+                schedule_str = (schedule_str + " " + schedule_match.group(0)).strip()
+                raw_dose = raw_dose.replace(schedule_match.group(0), "")
+
+        dose = raw_dose.strip()
+
+        # Require a specific dose and some schedule info to create a reminder.
+        if not dose or not schedule_str:
+            # Skip medications without explicit dose or schedule
+            continue
+
         label_base = _display_label_base(med)
-        schedule_str = med.get("schedule") or med.get("notes") or ""
         count = _parse_times_per_day(med)
         if count <= 0:
             count = _parse_times_per_day({"schedule": schedule_str})
         if count <= 0:
-            count = 1
+            # If we still can't determine frequency, skip
+            continue
 
         times = _schedule_to_times(schedule_str, count)
         times = times[:count]

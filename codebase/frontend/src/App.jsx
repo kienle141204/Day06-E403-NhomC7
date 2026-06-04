@@ -278,8 +278,39 @@ function App() {
     await runTask(async () => {
       const result = await api.createReminders(prescription.prescriptionId, 60)
       setReminders(result.reminders)
-      const timeCount = new Set(result.reminders.map((item) => item.time)).size
-      addMessage('assistant', `Đã tạo ${timeCount} lịch nhắc uống thuốc trước ${result.leadMinutes} phút.`)
+
+      if (!result.reminders || result.reminders.length === 0) {
+        // Find meds missing dose or schedule to inform the user
+        const missing = (prescription.medications || [])
+          .filter((m) => {
+            const dose = (m.dose || '').trim()
+            const schedule = (m.schedule || '').trim()
+            return !dose || !schedule
+          })
+          .map((m) => m.name || m.raw_name || 'Không rõ')
+
+        if (missing.length > 0) {
+          addMessage(
+            'assistant',
+            `Không thể tạo nhắc tự động. Đơn thuốc không chỉ rõ liều lượng hoặc thời gian uống cho các thuốc sau: ${missing.join(', ')}. Vui lòng chỉnh sửa thông tin từng thuốc trước khi tạo nhắc.`,
+          )
+        } else {
+          addMessage('assistant', 'Không thể tạo nhắc tự động cho đơn thuốc này.')
+        }
+      } else {
+        const timeCount = new Set(result.reminders.map((item) => item.time)).size
+        const skipped = (prescription.medications || []).filter((m) => {
+          const dose = (m.dose || '').trim()
+          const schedule = (m.schedule || '').trim()
+          return !dose || !schedule
+        }).length
+
+        let message = `Đã tạo ${timeCount} lịch nhắc uống thuốc trước ${result.leadMinutes} phút.`
+        if (skipped > 0) {
+          message += ` (${skipped} thuốc bị bỏ qua vì thiếu thông tin liều/lịch)`
+        }
+        addMessage('assistant', message)
+      }
       setQuickReplies(['Tác dụng phụ?', 'Lịch uống trong ngày'])
     })
   }
