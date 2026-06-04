@@ -138,4 +138,6 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     risk_level: str
+    intent: str
+    related_medications: list[str] = []
     safety_notice: str

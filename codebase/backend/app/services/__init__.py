@@ -8,6 +8,7 @@ from app.services.prescription_store import (
     get_prescription
 )
 from app.services.analysis_service import analyze_prescription
+from app.services.chat_service import answer_question
 
 __all__ = [
     "get_drug_data_service",
@@ -17,5 +18,6 @@ __all__ = [
     "save_confirmed",
     "save_analysis",
     "get_prescription",
-    "analyze_prescription"
+    "analyze_prescription",
+    "answer_question"
 ]

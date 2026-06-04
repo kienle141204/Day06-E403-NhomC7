@@ -150,8 +150,42 @@ function App() {
       return
     }
     await runTask(async () => {
+      // Confirm the prescription
       const result = await api.confirmPrescription(prescription.prescriptionId)
-      setPrescription(result)
+      
+      // Analyze to get drug info from local database
+      let analysisData = null
+      try {
+        const analyzeResponse = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000'}/prescription/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prescription_id: prescription.prescriptionId })
+        })
+        if (analyzeResponse.ok) {
+          analysisData = await analyzeResponse.json()
+        }
+      } catch (e) {
+        console.log('Analysis not available, using basic info')
+      }
+      
+      // Merge analysis data into prescription
+      const mergedPrescription = { ...result }
+      if (analysisData && analysisData.medications) {
+        mergedPrescription.medications = result.medications.map((med, idx) => {
+          const analysis = analysisData.medications[idx] || {}
+          return {
+            ...med,
+            category_vi: analysis.category_vi || med.category_vi,
+            uses_vi: analysis.uses_vi || [],
+            important_notes_vi: analysis.important_notes_vi || [],
+            risk_level: analysis.risk_level || 'normal',
+            found: analysis.found
+          }
+        })
+        mergedPrescription.analysis = analysisData
+      }
+      
+      setPrescription(mergedPrescription)
       addMessage(
         'assistant',
         'Đơn thuốc đã được xác nhận. Bây giờ bạn có thể hỏi về công dụng, cách uống, tác dụng phụ hoặc tạo nhắc uống thuốc.',

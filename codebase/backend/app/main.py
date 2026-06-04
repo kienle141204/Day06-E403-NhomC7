@@ -1,10 +1,16 @@
 """FastAPI main application for MedChat backend."""
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
 import uuid
 from copy import deepcopy
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 # Import from local services
 from app.schemas import (
@@ -22,7 +28,8 @@ from app.services import (
     save_analysis,
     get_prescription,
     analyze_prescription,
-    get_drug_data_service
+    get_drug_data_service,
+    answer_question
 )
 
 # Import from remote branch modules (if available)
@@ -33,7 +40,7 @@ except ImportError:
     HAS_AGENT = False
 
 try:
-    from .graphs.prescription_scan import scan_prescription_upload
+    from .vision import extract_prescription_from_image
     HAS_VISION = True
 except ImportError:
     HAS_VISION = False
@@ -75,12 +82,6 @@ class MedicationPatch(BaseModel):
     duration: str | None = None
 
 
-class ChatRequest(BaseModel):
-    prescriptionId: str
-    message: str
-    sessionId: str | None = None
-
-
 class ReminderItem(BaseModel):
     medicationId: str
     label: str
@@ -100,6 +101,67 @@ class AppointmentRequest(BaseModel):
 
 
 # === Helper Functions ===
+
+def _get_mime_type(filename: str) -> str:
+    """Get MIME type from filename extension."""
+    ext = filename.lower().split('.')[-1] if '.' in filename else ''
+    mime_types = {
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'png': 'image/png',
+        'webp': 'image/webp',
+        'gif': 'image/gif',
+        'bmp': 'image/bmp'
+    }
+    return mime_types.get(ext, 'image/jpeg')
+
+
+def _convert_vision_to_medication(vision_med, index: int) -> dict:
+    """Convert VisionMedication to frontend Medication format."""
+    return {
+        "id": f"med_{index + 1}",
+        "name": vision_med.name if hasattr(vision_med, 'name') else vision_med.get("name", ""),
+        "strength": vision_med.strength if hasattr(vision_med, 'strength') else vision_med.get("strength", ""),
+        "dose": vision_med.dose if hasattr(vision_med, 'dose') else vision_med.get("dose", ""),
+        "schedule": vision_med.schedule if hasattr(vision_med, 'schedule') else vision_med.get("schedule", ""),
+        "duration": vision_med.duration if hasattr(vision_med, 'duration') else vision_med.get("duration", ""),
+        "risk": "normal",
+        "confidence": vision_med.confidence if hasattr(vision_med, 'confidence') else vision_med.get("confidence", 0.7),
+        "notes": vision_med.notes if hasattr(vision_med, 'notes') else vision_med.get("notes", "")
+    }
+
+
+def _convert_vision_result(result, prescription_id: str) -> dict:
+    """Convert VisionPrescriptionResult to frontend Prescription format."""
+    medications = [
+        _convert_vision_to_medication(med, i)
+        for i, med in enumerate(result.medications)
+    ]
+    
+    warnings = []
+    if result.warnings:
+        for i, warning in enumerate(result.warnings):
+            warning_text = warning if isinstance(warning, str) else str(warning)
+            warnings.append({
+                "id": f"warn_{i + 1}",
+                "level": "medium",
+                "title": "Canh bao",
+                "detail": warning_text
+            })
+    
+    return {
+        "prescriptionId": prescription_id,
+        "confidence": result.confidence,
+        "doctorName": result.doctor_name or "Chưa xác định",
+        "clinic": result.clinic or "Chưa xác định",
+        "issuedAt": result.issued_at,
+        "status": "pending",
+        "medications": medications,
+        "warnings": warnings,
+        "is_valid_prescription": result.is_valid_prescription,
+        "reason": result.reason
+    }
+
 
 def get_prescription_or_404(prescription_id: str) -> dict:
     prescription = prescriptions.get(prescription_id)
@@ -145,47 +207,81 @@ async def health_check():
 @app.post("/prescriptions/scan")
 async def scan_prescription(file: UploadFile | None = File(default=None)):
     """
-    Scan prescription from uploaded file.
-    If file provided and vision module available, uses vision.
+    Scan prescription - extracts medications using vision OCR.
+    If file is provided, uses OpenAI vision model to extract medications.
     Otherwise returns mock medications for demo.
     """
     prescription_id = str(uuid.uuid4())
+    drug_service = get_drug_data_service()
     
-    # Mock medications for demo (matches frontend expectations)
-    medications = [
-        {
-            "id": "med_1",
-            "name": "Aerius 5mg",
-            "strength": "5mg",
-            "dose": "1 viên",
-            "schedule": "ngày 1 lần",
-            "duration": "5 ngày",
-            "risk": "normal",
-            "confidence": 0.92
-        },
-        {
-            "id": "med_2",
-            "name": "Augmentin 625mg",
-            "strength": "625mg",
-            "dose": "1 viên",
-            "schedule": "ngày 2 lần",
-            "duration": "5 ngày",
-            "risk": "normal",
-            "confidence": 0.89
-        },
-        {
-            "id": "med_3",
-            "name": "Cetirizine 10mg",
-            "strength": "10mg",
-            "dose": "1 viên",
-            "schedule": "khi cần",
-            "duration": "3 ngày",
-            "risk": "normal",
-            "confidence": 0.91
-        }
-    ]
+    # Try to extract from uploaded image using vision OCR
+    if file and file.filename:
+        filename_lower = file.filename.lower()
+        
+        # Check if file is an image
+        image_extensions = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp')
+        is_image = any(filename_lower.endswith(ext) for ext in image_extensions)
+        
+        if is_image and HAS_VISION:
+            try:
+                # Read file content and convert to base64
+                contents = await file.read()
+                import base64
+                image_base64 = base64.b64encode(contents).decode('utf-8')
+                mime_type = _get_mime_type(file.filename)
+                
+                # Use vision model to extract prescription
+                vision_result = await extract_prescription_from_image(image_base64, mime_type)
+                
+                # Check if valid prescription
+                if not vision_result.is_valid_prescription:
+                    return {
+                        "error": "not_prescription",
+                        "message": vision_result.reason or "Ảnh không phải là đơn thuốc hợp lệ.",
+                        "prescriptionId": prescription_id,
+                        "status": "rejected"
+                    }
+                
+                # Convert vision result to prescription format
+                prescription_data = _convert_vision_result(vision_result, prescription_id)
+                prescriptions[prescription_id] = prescription_data
+                save_extracted(prescription_id, prescription_data.get("medications", []))
+                
+                return prescription_data
+                
+            except HTTPException:
+                raise
+            except Exception as exc:
+                # Fallback to demo data if vision fails
+                medications = _get_demo_medications_with_lookup(drug_service)
+                warnings = [{
+                    "id": "warn_fallback",
+                    "level": "medium",
+                    "title": "OCR Demo Mode",
+                    "detail": f"Khong the quet anh ({str(exc)}). Hien thi du lieu demo."
+                }]
+                prescriptions[prescription_id] = {
+                    "prescriptionId": prescription_id,
+                    "confidence": 0.90,
+                    "doctorName": "BS. Demo",
+                    "clinic": "Phong kham Demo",
+                    "issuedAt": "2026-06-04",
+                    "status": "pending",
+                    "medications": medications,
+                    "warnings": warnings
+                }
+                save_extracted(prescription_id, medications)
+                return deepcopy(prescriptions[prescription_id])
+        else:
+            # Non-image file or vision not available, try filename matching
+            medications = _extract_from_filename(filename_lower, drug_service)
+            if not medications:
+                medications = _get_demo_medications_with_lookup(drug_service)
+    else:
+        # No file, use demo medications with local database lookup
+        medications = _get_demo_medications_with_lookup(drug_service)
     
-    # Save to stores
+    # Save to prescriptions store
     prescriptions[prescription_id] = {
         "prescriptionId": prescription_id,
         "confidence": 0.90,
@@ -201,6 +297,106 @@ async def scan_prescription(file: UploadFile | None = File(default=None)):
     save_extracted(prescription_id, medications)
     
     return deepcopy(prescriptions[prescription_id])
+
+
+def _extract_from_filename(filename: str, drug_service) -> list | None:
+    """Extract drug names from filename using local database."""
+    import re
+    # Remove extension and common prefixes
+    clean_name = re.sub(r'\.(jpg|jpeg|png|pdf|webp)$', '', filename, flags=re.IGNORECASE)
+    clean_name = re.sub(r'^(don|prescription|donthuoc|img|image|photo|pic|capture|screenshot)[\s_-]*', '', clean_name)
+    
+    # Try to match individual words against drug database
+    words = re.split(r'[\s_-]+', clean_name)
+    potential_names = []
+    
+    for word in words:
+        if len(word) >= 3:
+            result = drug_service.resolve_local_drug(word)
+            if result["found"] or result["needs_review"]:
+                matched = result["matched_item"]
+                if matched:
+                    potential_names.append(matched.get("ingredient_vi") or word)
+    
+    if potential_names:
+        return [
+            {
+                "id": f"med_{i+1}",
+                "name": name,
+                "strength": "Xem đơn",
+                "dose": "Xem đơn",
+                "schedule": "Theo chỉ định",
+                "duration": "Theo đơn",
+                "risk": "normal",
+                "confidence": 0.85
+            }
+            for i, name in enumerate(potential_names[:5])
+        ]
+    return None
+
+
+def _get_demo_medications():
+    """Return demo medications for testing."""
+    return [
+        {
+            "id": "med_1",
+            "name": "Desloratadine 5mg",
+            "strength": "5mg",
+            "dose": "1 viên",
+            "schedule": "ngày 1 lần",
+            "duration": "5 ngày",
+            "risk": "normal",
+            "confidence": 0.92
+        },
+        {
+            "id": "med_2",
+            "name": "Amoxicillin 500mg",
+            "strength": "500mg",
+            "dose": "1 viên",
+            "schedule": "ngày 3 lần",
+            "duration": "7 ngày",
+            "risk": "normal",
+            "confidence": 0.89
+        },
+        {
+            "id": "med_3",
+            "name": "Cetirizine 10mg",
+            "strength": "10mg",
+            "dose": "1 viên",
+            "schedule": "khi cần",
+            "duration": "3 ngày",
+            "risk": "normal",
+            "confidence": 0.91
+        }
+    ]
+
+
+def _get_demo_medications_with_lookup(drug_service):
+    """Return demo medications with info from local database."""
+    demo_names = ["Desloratadine", "Amoxicillin", "Cetirizine"]
+    medications = []
+    
+    for i, name in enumerate(demo_names):
+        result = drug_service.resolve_local_drug(name)
+        matched = result.get("matched_item", {})
+        
+        med = {
+            "id": f"med_{i+1}",
+            "name": name + " 5mg",
+            "strength": "5mg",
+            "dose": "1 viên",
+            "schedule": "ngày 1 lần",
+            "duration": "5 ngày",
+            "risk": "normal",
+            "confidence": result.get("confidence", 0.9)
+        }
+        
+        if matched.get("category_vi"):
+            med["category_vi"] = matched["category_vi"]
+        
+        medications.append(med)
+    
+    return medications
 
 
 class ConfirmResponse(BaseModel):
@@ -275,6 +471,13 @@ async def update_medication(
     }
 
 
+class ChatRequest(BaseModel):
+    prescription_id: Optional[str] = Field(default=None, alias="prescriptionId")
+    question: Optional[str] = Field(default=None, alias="message")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ChatResponseFrontend(BaseModel):
     answer: str
     quickReplies: Optional[list] = None
@@ -284,115 +487,23 @@ class ChatResponseFrontend(BaseModel):
 @app.post("/chat")
 async def chat(request: ChatRequest):
     """
-    Chat endpoint matching frontend format.
-    Uses deterministic responses based on question keywords.
+    Chat endpoint using deterministic chat service.
+    Accepts both internal schema (prescription_id + question) and
+    frontend schema (prescriptionId + message).
     """
-    prescription = prescriptions.get(request.prescriptionId)
-    if not prescription:
-        prescription = get_prescription(request.prescriptionId)
-    
-    if not prescription:
-        return ChatResponseFrontend(
-            answer="Không tìm thấy đơn thuốc. Vui lòng bắt đầu lại.",
-            quickReplies=None
-        )
-    
-    analysis = prescription.get("analysis")
-    question_lower = request.message.lower()
-    medications = analysis.get("medications", []) if analysis else prescription.get("medications", [])
-    
-    quick_replies = None
-    answer = ""
-    
-    # Handle specific question types
-    if "buồn ngủ" in question_lower or " ngủ" in question_lower or "tác dụng phụ" in question_lower:
-        answer = _handle_side_effects(medications)
-        quick_replies = ['Lịch uống trong ngày', 'Hỏi về thuốc', 'Tạo nhắc uống thuốc']
-    elif any(kw in question_lower for kw in ["uống gấp đôi", "tăng liều", "giảm liều", "ngưng", "tang lieu", "giam lieu", "ngung thuoc"]):
-        answer = "Mình không thể thay bác sĩ quyết định đổi liều hoặc ngừng thuốc. Hãy liên hệ bác sĩ để được tư vấn trực tiếp. Việc tự ý thay đổi liều có thể gây nguy hiểm."
-        quick_replies = ['Giải thích từng thuốc', 'Lịch uống trong ngày', 'Đặt lịch với bác sĩ']
-    elif "nhắc" in question_lower or "lịch" in question_lower or "uống thuốc" in question_lower:
-        answer = _handle_reminder_question(medications)
-        quick_replies = ['Tạo tất cả nhắc nhở', 'Chỉ nhắc buổi tối']
-    else:
-        answer = _handle_general_question(medications)
-        quick_replies = ['Tác dụng phụ?', 'Lịch uống trong ngày', 'Tạo nhắc uống thuốc']
-    
+    prescription_id = request.prescription_id
+    question = request.question
+
+    if not prescription_id or not question or not question.strip():
+        raise HTTPException(status_code=400, detail="prescription_id and question are required")
+
+    result = answer_question(prescription_id, question.strip())
+
     return ChatResponseFrontend(
-        answer=answer,
-        quickReplies=quick_replies
+        answer=result["answer"],
+        quickReplies=None,
+        risk_level=result["risk_level"]
     )
-
-
-def _handle_side_effects(medications: list) -> str:
-    """Handle questions about side effects."""
-    side_effect_info = []
-    
-    for med in medications:
-        name = med.get("name", "Unknown")
-        notes = med.get("important_notes_vi", [])
-        
-        if not notes:
-            notes = med.get("important_notes", [])
-        
-        notes_text = " ".join(notes).lower() if notes else ""
-        
-        category = med.get("category_vi", "") or ""
-        
-        if "kháng sinh" in category.lower():
-            side_effect_info.append(f"{name}: Có thể gây tiêu chảy, buồn nôn hoặc dị ứng da.")
-        elif "chống dị ứng" in category.lower() or "kháng histamine" in category.lower():
-            side_effect_info.append(f"{name}: Có thể gây buồn ngủ nhẹ.")
-        elif "hạ sốt" in category.lower() or "giảm đau" in category.lower():
-            side_effect_info.append(f"{name}: An toàn khi dùng đúng liều, tránh dùng quá liều.")
-    
-    if side_effect_info:
-        return "Thông tin về tác dụng phụ:\n" + "\n".join(f"• {info}" for info in side_effect_info)
-    return "Trong đơn thuốc hiện tại, các thuốc được liệt kê thường có tác dụng phụ nhẹ. Tuy nhiên, mỗi người có thể phản ứng khác nhau với thuốc."
-
-
-def _handle_reminder_question(medications: list) -> str:
-    """Handle questions about reminders."""
-    reminder_info = []
-    
-    for med in medications:
-        name = med.get("name", "Unknown")
-        schedule = med.get("schedule", med.get("frequency", ""))
-        duration = med.get("duration", "")
-        
-        if schedule and schedule not in ["khi cần", "khi can"]:
-            reminder_info.append(f"• {name}: {schedule} ({duration})")
-        elif schedule in ["khi cần", "khi can"]:
-            reminder_info.append(f"• {name}: Chỉ uống khi cần, không cần nhắc định kỳ")
-    
-    if reminder_info:
-        return "Tôi có thể tạo nhắc cho các thuốc sau:\n" + "\n".join(reminder_info)
-    return "Không có thuốc nào cần nhắc định kỳ trong đơn này."
-
-
-def _handle_general_question(medications: list) -> str:
-    """Handle general questions about medications."""
-    med_info = []
-    
-    for med in medications:
-        name = med.get("name", "Unknown")
-        schedule = med.get("schedule", med.get("frequency", "Không rõ"))
-        duration = med.get("duration", "")
-        found = med.get("found", True)
-        
-        if found:
-            uses = med.get("uses_vi", [])
-            if uses and isinstance(uses, list):
-                use_text = uses[0] if uses else "Thuốc theo đơn bác sĩ."
-                med_info.append(f"• {name}: {use_text}")
-            else:
-                med_info.append(f"• {name}: Thuốc theo đơn ({schedule}, {duration})")
-        else:
-            med_info.append(f"• {name}: Thuốc trong đơn ({schedule}, {duration})")
-    
-    if med_info:
-        return "Theo đơn đã xác nhận:\n" + "\n".join(med_info) + "\n\nThông tin chỉ mang tính tham khảo về thuốc."
-    return "Không có thông tin về thuốc trong đơn."
 
 
 # === Analysis Endpoint ===
