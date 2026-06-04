@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .agent import answer_medication_question
+from .graphs.prescription_scan import scan_prescription_upload
 from .mock_data import SPECIALISTS, initial_prescription_store
 
 
@@ -26,7 +27,6 @@ app.add_middleware(
 
 prescriptions = initial_prescription_store()
 chat_sessions: dict[str, dict] = {}
-last_scanned_index = 0
 
 
 class MedicationPatch(BaseModel):
@@ -121,15 +121,11 @@ def get_prescription(prescription_id: str):
 
 @app.post("/prescriptions/scan")
 async def scan_prescription(file: UploadFile | None = File(default=None)):
-    global last_scanned_index
+    if not file:
+        raise HTTPException(status_code=400, detail="Prescription image is required.")
 
-    items = list(prescriptions.values())
-    if not items:
-        raise HTTPException(status_code=404, detail="No mock prescriptions available.")
-
-    prescription = items[last_scanned_index % len(items)]
-    last_scanned_index += 1
-    prescription["status"] = "pending"
+    prescription = await scan_prescription_upload(file)
+    prescriptions[prescription["prescriptionId"]] = prescription
     return deepcopy(prescription)
 
 
