@@ -1,10 +1,14 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   BotMessageSquare,
   Check,
+  ChevronDown,
+  ChevronUp,
   Clock3,
+  Download,
   FileText,
+  History,
   Info,
   MapPin,
   MessageCircle,
@@ -12,10 +16,12 @@ import {
   SendHorizontal,
   ShieldCheck,
   Stethoscope,
+  Trash2,
   UploadCloud,
   X,
 } from 'lucide-react'
 import { api } from './api/client.js'
+import { getAllSessions, upsertSession, removeSession, exportDatabase } from './db/history.js'
 
 const initialMessages = [
   {
@@ -33,10 +39,10 @@ const reminderDefaults = [
 ]
 
 const navItems = [
-  ['chat', 'Đọc đơn AI', true],
-  ['file', 'Đơn của tôi', false],
-  ['clock', 'Nhắc uống thuốc', false],
-  ['map', 'Nhà thuốc gần đây', false],
+  ['chat', 'Đọc đơn AI', 'chat'],
+  ['file', 'Đơn của tôi', 'history'],
+  ['clock', 'Nhắc uống thuốc', 'clock'],
+  ['map', 'Nhà thuốc gần đây', 'map'],
 ]
 
 function App() {
@@ -54,11 +60,35 @@ function App() {
   const [panelOpen, setPanelOpen] = useState(false)
   const [editingMedicationId, setEditingMedicationId] = useState('')
   const [editName, setEditName] = useState('')
+  const [activeNav, setActiveNav] = useState('chat')
+  const [history, setHistory] = useState([])
+  const [dbReady, setDbReady] = useState(false)
+
+  useEffect(() => {
+    getAllSessions()
+      .then((rows) => {
+        setHistory(rows)
+        setDbReady(true)
+      })
+      .catch(() => setDbReady(true))
+  }, [])
 
   const highRisk = useMemo(
     () => prescription?.medications?.some((item) => item.risk === 'high') || false,
     [prescription],
   )
+
+  async function saveCurrentSession(currentPrescription, currentMessages) {
+    if (!currentPrescription) return
+    await upsertSession(currentPrescription, currentMessages)
+    const rows = await getAllSessions()
+    setHistory(rows)
+  }
+
+  async function deleteSession(id) {
+    await removeSession(id)
+    setHistory((prev) => prev.filter((h) => h.id !== id))
+  }
 
   function addMessage(role, text, meta) {
     setMessages((items) => [
@@ -81,6 +111,7 @@ function App() {
 
   async function handleUpload(file) {
     if (!file) return
+    await saveCurrentSession(prescription, messages)
     await runTask(async () => {
       addMessage('user', `Đã chọn tệp: ${file.name}`)
       const result = await api.scanPrescription(file)
@@ -250,56 +281,66 @@ function App() {
 
   return (
     <div className="grid h-dvh min-w-80 grid-cols-1 overflow-hidden bg-[#eef5ff] text-slate-900 [font-family:'Be_Vietnam_Pro',ui-sans-serif,system-ui,sans-serif] lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)_360px]">
-      <Sidebar usingMock={api.usingMock} />
+      <Sidebar usingMock={api.usingMock} activeNav={activeNav} onNavChange={setActiveNav} />
 
       <main className="flex min-h-0 min-w-0 flex-col">
         <header className="flex min-h-20 items-center gap-3 border-b border-blue-100 bg-white/90 px-4 shadow-sm shadow-blue-950/5 backdrop-blur md:px-6">
-          <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-blue-700 to-cyan-500 text-white shadow-lg shadow-blue-200">
-            <Icon name="chat" />
+          <div className={`grid size-11 shrink-0 place-items-center rounded-2xl text-white shadow-lg ${activeNav === 'history' ? 'bg-gradient-to-br from-slate-700 to-slate-500 shadow-slate-200' : 'bg-gradient-to-br from-blue-700 to-cyan-500 shadow-blue-200'}`}>
+            <Icon name={activeNav === 'history' ? 'history' : 'chat'} />
           </div>
           <div className="min-w-0">
             <p className="text-xs font-bold uppercase text-blue-700">Dược sĩ AI</p>
-            <h1 className="truncate text-lg font-bold text-slate-950 md:text-xl">MedChat đơn thuốc</h1>
+            <h1 className="truncate text-lg font-bold text-slate-950 md:text-xl">
+              {activeNav === 'history' ? 'Lịch sử đơn thuốc' : 'MedChat đơn thuốc'}
+            </h1>
           </div>
           <div className="ml-auto flex items-center gap-2">
             <button className="hidden size-10 place-items-center rounded-xl bg-blue-50 text-blue-800 ring-1 ring-blue-100 md:grid" type="button" title="Thông tin">
               <Icon name="info" />
             </button>
-            <button
-              className="inline-flex h-10 items-center rounded-xl border border-blue-200 bg-white px-4 text-sm font-bold text-blue-800 shadow-sm xl:hidden"
-              type="button"
-              onClick={() => setPanelOpen(true)}
-            >
-              Đơn thuốc
-            </button>
+            {activeNav === 'chat' ? (
+              <button
+                className="inline-flex h-10 items-center rounded-xl border border-blue-200 bg-white px-4 text-sm font-bold text-blue-800 shadow-sm xl:hidden"
+                type="button"
+                onClick={() => setPanelOpen(true)}
+              >
+                Đơn thuốc
+              </button>
+            ) : null}
           </div>
         </header>
 
-        <ChatWindow messages={messages} busy={busy} highRisk={highRisk} />
+        {activeNav === 'history' ? (
+          <HistoryView history={history} onDelete={deleteSession} dbReady={dbReady} />
+        ) : (
+          <>
+            <ChatWindow messages={messages} busy={busy} highRisk={highRisk} />
 
-        {error ? (
-          <div className="mx-4 mb-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700 md:mx-6">
-            {error}
-          </div>
-        ) : null}
+            {error ? (
+              <div className="mx-4 mb-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700 md:mx-6">
+                {error}
+              </div>
+            ) : null}
 
-        <QuickReplies items={quickReplies} onPick={sendMessage} />
+            <QuickReplies items={quickReplies} onPick={sendMessage} />
 
-        <Composer
-          input={input}
-          setInput={setInput}
-          onSend={() => sendMessage()}
-          onUploadClick={() => fileInputRef.current?.click()}
-          busy={busy}
-        />
+            <Composer
+              input={input}
+              setInput={setInput}
+              onSend={() => sendMessage()}
+              onUploadClick={() => fileInputRef.current?.click()}
+              busy={busy}
+            />
 
-        <input
-          ref={fileInputRef}
-          className="hidden"
-          type="file"
-          accept="image/*,.pdf"
-          onChange={(event) => handleUpload(event.target.files?.[0])}
-        />
+            <input
+              ref={fileInputRef}
+              className="hidden"
+              type="file"
+              accept="image/*,.pdf"
+              onChange={(event) => handleUpload(event.target.files?.[0])}
+            />
+          </>
+        )}
       </main>
 
       <PrescriptionPanel
@@ -328,7 +369,7 @@ function App() {
   )
 }
 
-function Sidebar({ usingMock }) {
+function Sidebar({ usingMock, activeNav, onNavChange }) {
   return (
     <aside className="hidden flex-col gap-6 bg-[#071a33] px-4 py-6 text-blue-100 lg:flex">
       <div className="flex items-center gap-3">
@@ -342,13 +383,14 @@ function Sidebar({ usingMock }) {
       </div>
 
       <nav className="grid gap-2" aria-label="Main">
-        {navItems.map(([icon, label, active]) => (
+        {navItems.map(([icon, label, navId]) => (
           <button
             className={`flex h-11 items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold transition ${
-              active ? 'bg-blue-600 text-white shadow-lg shadow-blue-950/30' : 'text-blue-200 hover:bg-white/10 hover:text-white'
+              activeNav === navId ? 'bg-blue-600 text-white shadow-lg shadow-blue-950/30' : 'text-blue-200 hover:bg-white/10 hover:text-white'
             }`}
             type="button"
             key={label}
+            onClick={() => onNavChange(navId)}
           >
             <Icon name={icon} />
             <span>{label}</span>
@@ -680,6 +722,112 @@ function SectionTitle({ title, meta }) {
   )
 }
 
+function HistoryView({ history, onDelete, dbReady }) {
+  const [openId, setOpenId] = useState(null)
+
+  if (!dbReady) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-400">
+        <div className="flex gap-1">
+          <span className="size-2 animate-bounce rounded-full bg-blue-300" />
+          <span className="size-2 animate-bounce rounded-full bg-blue-500 [animation-delay:150ms]" />
+          <span className="size-2 animate-bounce rounded-full bg-cyan-500 [animation-delay:300ms]" />
+        </div>
+        <p className="text-sm text-slate-400">Đang khởi động cơ sở dữ liệu...</p>
+      </div>
+    )
+  }
+
+  if (!history.length) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-400">
+        <div className="grid size-14 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+          <History className="h-7 w-7" strokeWidth={1.8} />
+        </div>
+        <p className="text-sm font-semibold text-slate-500">Chưa có lịch sử chat nào</p>
+        <p className="max-w-xs text-center text-xs leading-5 text-slate-400">
+          Mỗi lần bạn tải đơn thuốc mới, phiên chat cũ sẽ được lưu vào SQLite và hiển thị tại đây.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-4 md:p-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-bold text-slate-900">{history.length} phiên đã lưu</h2>
+        <button
+          className="flex items-center gap-1.5 rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-xs font-bold text-blue-700 shadow-sm transition hover:bg-blue-50"
+          type="button"
+          onClick={exportDatabase}
+          title="Tải file .db về máy, mở bằng DB Browser for SQLite"
+        >
+          <Download className="h-3.5 w-3.5" />
+          Export .db
+        </button>
+      </div>
+
+      {history.map((session) => {
+        const isOpen = openId === session.id
+        const userMsgs = session.messages.filter((m) => m.role === 'user' && !m.text.startsWith('Đã chọn tệp:')).length
+        return (
+          <div key={session.id} className="overflow-hidden rounded-2xl border border-blue-100 bg-white shadow-sm">
+            <button
+              className="flex w-full items-center gap-3 p-4 text-left transition hover:bg-blue-50/50"
+              type="button"
+              onClick={() => setOpenId(isOpen ? null : session.id)}
+            >
+              <div className={`grid size-10 shrink-0 place-items-center rounded-xl ${session.prescription.status === 'confirmed' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+                <Icon name="file" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <strong className="block truncate text-sm text-slate-900">{session.prescription.doctorName}</strong>
+                <span className="block truncate text-xs text-slate-500">{session.prescription.clinic}</span>
+                <div className="mt-1 flex items-center gap-2">
+                  <span className={`size-2 rounded-full ${session.prescription.status === 'confirmed' ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                  <small className="text-xs text-slate-400">
+                    {new Date(session.savedAt).toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                  </small>
+                  <small className="text-xs font-semibold text-blue-700">{userMsgs} câu hỏi</small>
+                </div>
+              </div>
+              <div className="shrink-0 text-slate-400">
+                {isOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </div>
+            </button>
+
+            {isOpen ? (
+              <div className="border-t border-blue-50">
+                <div className="flex flex-col gap-3 overflow-y-auto bg-[#f4f8ff] p-4" style={{ maxHeight: '420px' }}>
+                  {session.messages.map((msg) => (
+                    <MessageBubble key={msg.id} message={msg} />
+                  ))}
+                </div>
+                <div className="flex items-center justify-between border-t border-blue-50 px-4 py-3">
+                  <span className="text-xs text-slate-400">
+                    {session.prescription.medications.length} thuốc · {session.prescription.status === 'confirmed' ? 'Đã xác nhận' : 'Chưa xác nhận'}
+                  </span>
+                  <button
+                    className="flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 transition hover:bg-rose-100"
+                    type="button"
+                    onClick={() => {
+                      onDelete(session.id)
+                      setOpenId(null)
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Xóa
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function Icon({ name }) {
   const icons = {
     alert: AlertTriangle,
@@ -690,6 +838,7 @@ function Icon({ name }) {
     close: X,
     doctor: Stethoscope,
     file: FileText,
+    history: History,
     info: Info,
     map: MapPin,
     pill: Pill,
