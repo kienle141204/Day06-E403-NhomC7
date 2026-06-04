@@ -11,7 +11,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.graphs import scan_prescription_upload, confirm_graph, chat_graph
+from app.graphs import scan_prescription_upload, confirm_graph, chat_graph, reminders_graph
 from app.services import (
     save_extracted,
     save_enriched,
@@ -216,6 +216,43 @@ async def chat(request: ChatRequest):
         quickReplies=state.get("quick_replies"),
         risk_level=state.get("risk_level", "low"),
     )
+
+
+class GenerateRemindersRequest(BaseModel):
+    leadMinutes: int = 60
+
+
+@app.post("/prescriptions/{prescription_id}/reminders")
+async def generate_reminders(prescription_id: str, request: GenerateRemindersRequest):
+    """Generate reminders for a confirmed prescription using the reminders graph."""
+    prescription = get_prescription(prescription_id) or _get_prescription_or_404(prescription_id)
+    if prescription.get("status") != "confirmed":
+        raise HTTPException(
+            status_code=400,
+            detail="Prescription must be confirmed before generating reminders.",
+        )
+
+    state = await reminders_graph.ainvoke({
+        "prescription_id": prescription_id,
+        "prescription": prescription,
+        "leadMinutes": request.leadMinutes,
+        "errors": [],
+    })
+
+    reminders = state.get("reminders", [])
+    return {
+        "leadMinutes": request.leadMinutes,
+        "reminders": [
+            {
+                "id": f"rem-{i + 1}",
+                "medicationId": item.get("medicationId", ""),
+                "label": item.get("label", ""),
+                "time": item.get("time", ""),
+                "active": True,
+            }
+            for i, item in enumerate(reminders)
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -31,12 +31,6 @@ const initialMessages = [
   },
 ]
 
-const reminderDefaults = [
-  { medicationId: 'med-1', label: 'Metformin sau ăn sáng', time: '07:00' },
-  { medicationId: 'med-1', label: 'Metformin sau ăn tối', time: '18:00' },
-  { medicationId: 'med-2', label: 'Atorvastatin trước khi ngủ', time: '21:00' },
-  { medicationId: 'med-3', label: 'Prednisolone sau ăn sáng', time: '07:30' },
-]
 
 const navItems = [
   ['chat', 'Đọc đơn AI', 'chat'],
@@ -168,8 +162,8 @@ function App() {
         console.log('Analysis not available, using basic info')
       }
       
-      // Merge analysis data into prescription
-      const mergedPrescription = { ...result }
+      // Merge analysis data into prescription and preserve metadata like doctorName
+      const mergedPrescription = { ...prescription, ...result }
       if (analysisData && analysisData.medications) {
         mergedPrescription.medications = result.medications.map((med, idx) => {
           const analysis = analysisData.medications[idx] || {}
@@ -179,7 +173,7 @@ function App() {
             uses_vi: analysis.uses_vi || [],
             important_notes_vi: analysis.important_notes_vi || [],
             risk_level: analysis.risk_level || 'normal',
-            found: analysis.found
+            found: analysis.found,
           }
         })
         mergedPrescription.analysis = analysisData
@@ -282,9 +276,10 @@ function App() {
   async function createReminders() {
     if (!prescription) return
     await runTask(async () => {
-      const result = await api.createReminders(prescription.prescriptionId, reminderDefaults, 60)
+      const result = await api.createReminders(prescription.prescriptionId, 60)
       setReminders(result.reminders)
-      addMessage('assistant', `Đã tạo ${result.reminders.length} nhắc uống thuốc trước 60 phút.`)
+      const timeCount = new Set(result.reminders.map((item) => item.time)).size
+      addMessage('assistant', `Đã tạo ${timeCount} lịch nhắc uống thuốc trước ${result.leadMinutes} phút.`)
       setQuickReplies(['Tác dụng phụ?', 'Lịch uống trong ngày'])
     })
   }
@@ -602,7 +597,7 @@ function PrescriptionPanel(props) {
         <div className="flex items-start justify-between gap-3 border-b border-blue-100 bg-blue-50/90 px-5 py-5">
           <div>
             <p className="text-xs font-bold uppercase text-blue-700">Đơn thuốc hiện tại</p>
-            <h2 className="mt-1 text-lg font-bold text-slate-950">{prescription ? prescription.doctorName : 'Chưa có dữ liệu'}</h2>
+            <h2 className="mt-1 text-lg font-bold text-slate-950">{prescription ? `BS. ${prescription.doctorName}` : 'Chưa có dữ liệu'}</h2>
           </div>
           <button className="grid size-9 place-items-center rounded-xl bg-white text-blue-800 ring-1 ring-blue-100 xl:hidden" type="button" onClick={onClose} title="Đóng">
             <Icon name="close" />
@@ -690,10 +685,11 @@ function PrescriptionPanel(props) {
               </button>
             </div>
 
-            <PanelList
+            <RemindersByTime
               title="Nhắc uống thuốc"
               empty="Chưa có nhắc nhở"
-              items={reminders.map((item) => `${item.time} · ${item.label}`)}
+              reminders={reminders}
+              prescription={prescription}
             />
 
             <section className="border-b border-blue-50 p-5">
@@ -732,15 +728,75 @@ function PrescriptionPanel(props) {
   )
 }
 
-function PanelList({ title, empty, items }) {
+function RemindersByTime({ title, empty, reminders, prescription }) {
+  const medicationMap = (prescription?.medications || []).reduce((acc, med) => {
+    acc[med.id] = med
+    return acc
+  }, {})
+
+  const parseTime = (time) => {
+    const [hours, minutes] = (time || '00:00').split(':').map(Number)
+    return hours * 60 + minutes
+  }
+
+  const formatTime = (minutes) => {
+    const h = String(Math.floor(minutes / 60)).padStart(2, '0')
+    const m = String(minutes % 60).padStart(2, '0')
+    return `${h}:${m}`
+  }
+
+  const groups = reminders
+    .slice()
+    .filter((item) => item.time)
+    .sort((a, b) => parseTime(a.time) - parseTime(b.time))
+    .reduce((acc, item) => {
+      const itemMinutes = parseTime(item.time)
+      const current = acc[acc.length - 1]
+      if (!current) {
+        acc.push({ start: itemMinutes, end: itemMinutes, items: [item] })
+        return acc
+      }
+
+      if (itemMinutes - current.end <= 30) {
+        current.end = Math.max(current.end, itemMinutes)
+        current.items.push(item)
+      } else {
+        acc.push({ start: itemMinutes, end: itemMinutes, items: [item] })
+      }
+      return acc
+    }, [])
+
   return (
     <section className="border-b border-blue-50 p-5">
-      <SectionTitle title={title} meta={items.length ? `${items.length} nhắc` : empty} />
-      {items.length ? (
-        <div className="grid gap-2">
-          {items.map((item) => (
-            <span className="rounded-xl bg-blue-50 px-3 py-2 text-sm text-slate-600" key={item}>{item}</span>
-          ))}
+      <SectionTitle title={title} meta={groups.length ? `${reminders.length} nhắc` : empty} />
+      {groups.length ? (
+        <div className="grid gap-4">
+          {groups.map((group) => {
+            const label = group.start === group.end ? formatTime(group.start) : `${formatTime(group.start)} - ${formatTime(group.end)}`
+            return (
+              <div key={label} className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <strong className="text-sm font-bold text-slate-950">{label}</strong>
+                  <span className="text-xs font-semibold text-slate-500">{group.items.length} thuốc</span>
+                </div>
+                <div className="grid gap-2">
+                  {group.items.map((item) => {
+                    const med = medicationMap[item.medicationId]
+                    const name = med?.name || item.label
+                    const details = med?.dose || ''
+                    return (
+                      <div key={`${item.medicationId}-${item.time}-${item.label}`} className="rounded-xl bg-white px-3 py-3 shadow-sm">
+                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                          <strong className="text-sm text-slate-950">{name}</strong>
+                          <span className="text-xs text-slate-500">{details || item.label}</span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
         </div>
       ) : null}
     </section>

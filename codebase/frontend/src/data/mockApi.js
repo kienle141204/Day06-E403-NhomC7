@@ -253,18 +253,54 @@ export function createMockApi() {
       }
     },
 
-    async createReminders(_prescriptionId, items, leadMinutes) {
+    async createReminders(_prescriptionId, leadMinutes = 60) {
       await delay(650)
-      return {
-        leadMinutes,
-        reminders: items.map((item, index) => ({
-          id: `rem-${index + 1}`,
-          medicationId: item.medicationId,
-          label: item.label,
-          time: item.time,
-          active: true,
-        })),
+      if (!prescription) {
+        return { leadMinutes, reminders: [] }
       }
+
+      const reminders = []
+      const scheduleMap = {
+        morning: '08:00',
+        noon: '12:30',
+        afternoon: '16:30',
+        evening: '19:00',
+        night: '21:00',
+      }
+
+      prescription.medications.forEach((item) => {
+        const schedule = (item.schedule || '').toLowerCase()
+        const times = []
+        if (schedule.includes('sáng') && schedule.includes('trưa') && schedule.includes('tối')) {
+          times.push(scheduleMap.morning, scheduleMap.noon, scheduleMap.evening)
+        } else if (schedule.includes('sáng') && schedule.includes('tối')) {
+          times.push(scheduleMap.morning, scheduleMap.night)
+        } else if (schedule.includes('trưa')) {
+          times.push(scheduleMap.noon)
+        } else if (schedule.includes('tối') || schedule.includes('đêm')) {
+          times.push(scheduleMap.evening)
+        } else if (schedule.includes('sáng')) {
+          times.push(scheduleMap.morning)
+        } else {
+          times.push(scheduleMap.morning)
+        }
+
+        if (!times.length) {
+          times.push(scheduleMap.morning)
+        }
+
+        times.forEach((time) => {
+          reminders.push({
+            id: `rem-${reminders.length + 1}`,
+            medicationId: item.id,
+            label: `${item.name}${item.dose ? ' ' + item.dose : ''}${item.schedule ? ' ' + item.schedule : ''}`,
+            time,
+            active: true,
+          })
+        })
+      })
+
+      return { leadMinutes, reminders }
     },
 
     async getSpecialists() {
