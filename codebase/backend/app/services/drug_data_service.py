@@ -13,6 +13,8 @@ class DrugDataService:
     def __init__(self):
         self.drug_items: List[Dict] = []
         self.ingredient_dict: Dict[str, Dict] = {}
+        self._choices: List[str] = []
+        self._choice_map: Dict[str, Dict] = {}
         self._load_data()
     
     def _load_data(self):
@@ -29,14 +31,33 @@ class DrugDataService:
                 key = item.get("key", "")
                 if key:
                     self.ingredient_dict[key] = item
+        
+        # Build searchable corpus from ingredient_dictionary
+        self._build_search_corpus()
+    
+    def _build_search_corpus(self):
+        """Build searchable text corpus for fuzzy matching."""
+        self._choices = []
+        self._choice_map = {}
+        
+        # Add ingredient dictionary entries (these are the clean names)
+        for key, item in self.ingredient_dict.items():
+            searchable = self._create_ingredient_searchable(item)
+            self._choices.append(searchable)
+            self._choice_map[searchable] = item
+        
+        # Also add drug_items for raw name matching
+        for item in self.drug_items:
+            searchable = self._create_item_searchable(item)
+            if searchable:
+                self._choices.append(searchable)
+                self._choice_map[searchable] = item
     
     def _extract_drug_items(self, data: Any) -> List[Dict]:
         """Auto-detect drug items list from various JSON structures."""
-        # Case 1: root is a list
         if isinstance(data, list):
             return [item for item in data if isinstance(item, dict) and self._is_drug_item(item)]
         
-        # Case 2: root has "items" key
         if isinstance(data, dict):
             if "items" in data and isinstance(data["items"], list):
                 return data["items"]
@@ -45,7 +66,6 @@ class DrugDataService:
             if "drugs" in data and isinstance(data["drugs"], list):
                 return data["drugs"]
             
-            # Case 3: scan root values for list of dicts with drug fields
             for key, value in data.items():
                 if isinstance(value, list) and len(value) > 0:
                     if self._is_drug_item(value[0]):
@@ -63,18 +83,23 @@ class DrugDataService:
         """Normalize Vietnamese text for comparison."""
         if not text:
             return ""
-        # Lowercase
         text = text.lower()
-        # Remove accents (normalize unicode)
         text = unicodedata.normalize("NFD", text)
         text = "".join(c for c in text if unicodedata.category(c) != "Mn")
-        # Remove special characters
         text = re.sub(r"[^\w\s]", " ", text)
-        # Normalize whitespace
         text = " ".join(text.split())
         return text
     
-    def _create_searchable_text(self, item: Dict) -> str:
+    def _create_ingredient_searchable(self, item: Dict) -> str:
+        """Create searchable text from ingredient dict."""
+        parts = []
+        for field in ["ingredient_vi", "ingredient_en", "key", "category_vi"]:
+            value = item.get(field)
+            if value:
+                parts.append(str(value))
+        return " | ".join(parts)
+    
+    def _create_item_searchable(self, item: Dict) -> str:
         """Create searchable text from drug item."""
         parts = []
         for field in ["raw_left", "raw_line", "ingredient_vi", "ingredient_en", 
@@ -82,7 +107,7 @@ class DrugDataService:
             value = item.get(field)
             if value:
                 parts.append(str(value))
-        return " | ".join(parts)
+        return " | ".join(parts) if parts else ""
     
     def resolve_local_drug(self, raw_name: str) -> Dict[str, Any]:
         """
@@ -95,7 +120,7 @@ class DrugDataService:
         - confidence: float
         - match_score: float
         """
-        if not raw_name or not self.drug_items:
+        if not raw_name or not self._choices:
             return {
                 "found": False,
                 "needs_review": False,
@@ -106,32 +131,37 @@ class DrugDataService:
         
         normalized_query = self._normalize_text(raw_name)
         
-        # Create searchable corpus
-        choices = []
-        item_map = {}
-        for item in self.drug_items:
-            searchable = self._create_searchable_text(item)
-            if searchable:
-                choices.append(searchable)
-                item_map[searchable] = item
+        # Try multiple search strategies
+        best_result = None
         
-        if not choices:
-            return {
-                "found": False,
-                "needs_review": False,
-                "matched_item": None,
-                "confidence": 0.0,
-                "match_score": 0.0
-            }
-        
-        # Find best match using rapidfuzz
+        # Strategy 1: Direct match with partial ratio (better for partial matches)
         result = process.extractOne(
             normalized_query,
-            choices,
+            self._choices,
+            scorer=fuzz.partial_ratio
+        )
+        if result:
+            best_result = result
+        
+        # Strategy 2: Token sort ratio (good for reordered words)
+        result2 = process.extractOne(
+            normalized_query,
+            self._choices,
+            scorer=fuzz.token_sort_ratio
+        )
+        if result2 and (not best_result or result2[1] > best_result[1]):
+            best_result = result2
+        
+        # Strategy 3: WRatio (comprehensive)
+        result3 = process.extractOne(
+            normalized_query,
+            self._choices,
             scorer=fuzz.WRatio
         )
+        if result3 and (not best_result or result3[1] > best_result[1]):
+            best_result = result3
         
-        if not result:
+        if not best_result:
             return {
                 "found": False,
                 "needs_review": False,
@@ -140,8 +170,8 @@ class DrugDataService:
                 "match_score": 0.0
             }
         
-        best_match, match_score, _ = result
-        matched_item = item_map.get(best_match, {})
+        best_match, match_score, _ = best_result
+        matched_item = self._choice_map.get(best_match, {})
         
         # Determine if found based on score
         found = match_score >= FUZZY_ACCEPT_SCORE
@@ -174,32 +204,51 @@ class DrugDataService:
                 "duration": duration
             }
         
-        # Extract source URLs
-        source_urls = []
-        ingredient_key = matched_item.get("matched_ingredient_key")
-        if ingredient_key and ingredient_key in self.ingredient_dict:
-            ingredient_data = self.ingredient_dict[ingredient_key]
-            source_urls = ingredient_data.get("sources", [])
+        # Check if it's an ingredient_dict item or drug_item
+        if "key" in matched_item:
+            # It's from ingredient_dictionary
+            return {
+                "raw_name": raw_name,
+                "found": True,
+                "source": "ingredient_dictionary",
+                "matched_name": matched_item.get("ingredient_vi"),
+                "ingredient_vi": matched_item.get("ingredient_vi"),
+                "ingredient_en": matched_item.get("ingredient_en"),
+                "category_vi": matched_item.get("category_vi"),
+                "uses_vi": matched_item.get("uses_vi", []),
+                "important_notes_vi": matched_item.get("important_notes_vi", []),
+                "source_urls": matched_item.get("sources", []),
+                "confidence": result["confidence"],
+                "needs_review": result["needs_review"],
+                "dosage": dosage,
+                "frequency": frequency,
+                "duration": duration
+            }
         else:
+            # It's from drug_items
             source_urls = matched_item.get("source_urls", [])
-        
-        return {
-            "raw_name": raw_name,
-            "found": True,
-            "source": "local_database",
-            "matched_name": matched_item.get("ingredient_vi") or matched_item.get("ingredient_en"),
-            "ingredient_vi": matched_item.get("ingredient_vi"),
-            "ingredient_en": matched_item.get("ingredient_en"),
-            "category_vi": matched_item.get("category_vi"),
-            "uses_vi": matched_item.get("uses_vi", []),
-            "important_notes_vi": matched_item.get("important_notes_vi", []),
-            "source_urls": source_urls,
-            "confidence": result["confidence"],
-            "needs_review": result["needs_review"],
-            "dosage": dosage,
-            "frequency": frequency,
-            "duration": duration
-        }
+            ingredient_key = matched_item.get("matched_ingredient_key")
+            if ingredient_key and ingredient_key in self.ingredient_dict:
+                ingredient_data = self.ingredient_dict[ingredient_key]
+                source_urls = ingredient_data.get("sources", source_urls)
+            
+            return {
+                "raw_name": raw_name,
+                "found": True,
+                "source": "drug_items",
+                "matched_name": matched_item.get("ingredient_vi") or matched_item.get("ingredient_en"),
+                "ingredient_vi": matched_item.get("ingredient_vi"),
+                "ingredient_en": matched_item.get("ingredient_en"),
+                "category_vi": matched_item.get("category_vi"),
+                "uses_vi": matched_item.get("uses_vi", []),
+                "important_notes_vi": matched_item.get("important_notes_vi", []),
+                "source_urls": source_urls,
+                "confidence": result["confidence"],
+                "needs_review": result["needs_review"],
+                "dosage": dosage,
+                "frequency": frequency,
+                "duration": duration
+            }
 
 
 # Singleton instance
