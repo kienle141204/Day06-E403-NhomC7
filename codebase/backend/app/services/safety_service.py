@@ -2,24 +2,39 @@
 from typing import List
 
 HIGH_RISK_KEYWORDS = [
-    "kháng sinh",
-    "corticosteroid",
-    "retinoid",
-    "tramadol",
+    # Opioids và giảm đau mạnh — nguy cơ ức chế hô hấp, phụ thuộc
     "opioid",
-    "methotrexate",
+    "tramadol",
+    "morphine",
+    "codeine",
+    "fentanyl",
+    # Gây quái thai — cấm tuyệt đối khi mang thai
     "isotretinoin",
     "acitretin",
+    "retinoid",
+    "thalidomide",
+    # Chỉ số điều trị hẹp — quá liều gây chết người
+    "methotrexate",
     "colchicine",
-    "potassium chloride",
-    "kali"
+    "digoxin",
+    "warfarin",
+    "lithium",
+    # Thuốc độc tế bào / hóa trị
+    "cyclophosphamide",
+    "vincristine",
+    "bleomycin",
 ]
 
 MEDIUM_RISK_KEYWORDS = [
+    # Cần theo dõi nhưng phổ biến, không trực tiếp nguy hiểm tính mạng
+    "corticosteroid",
+    "kháng sinh",
     "chống chỉ định",
     "thận",
     "gan",
-    "tim"
+    "tim",
+    "potassium chloride",
+    "kali chloride",
 ]
 
 SAFETY_NOTICE = (
