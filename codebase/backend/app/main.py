@@ -1,7 +1,9 @@
 """FastAPI main application for MedChat backend."""
+import os
 import uuid
 from copy import deepcopy
 from typing import Optional
+from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -44,6 +46,8 @@ try:
 except ImportError:
     HAS_MOCK = False
 
+
+load_dotenv()
 
 app = FastAPI(
     title="MedChat API",
@@ -145,62 +149,19 @@ async def health_check():
 @app.post("/prescriptions/scan")
 async def scan_prescription(file: UploadFile | None = File(default=None)):
     """
-    Scan prescription from uploaded file.
-    If file provided and vision module available, uses vision.
-    Otherwise returns mock medications for demo.
+    Scan prescription from uploaded file using the configured VLM.
     """
-    prescription_id = str(uuid.uuid4())
-    
-    # Mock medications for demo (matches frontend expectations)
-    medications = [
-        {
-            "id": "med_1",
-            "name": "Aerius 5mg",
-            "strength": "5mg",
-            "dose": "1 viên",
-            "schedule": "ngày 1 lần",
-            "duration": "5 ngày",
-            "risk": "normal",
-            "confidence": 0.92
-        },
-        {
-            "id": "med_2",
-            "name": "Augmentin 625mg",
-            "strength": "625mg",
-            "dose": "1 viên",
-            "schedule": "ngày 2 lần",
-            "duration": "5 ngày",
-            "risk": "normal",
-            "confidence": 0.89
-        },
-        {
-            "id": "med_3",
-            "name": "Cetirizine 10mg",
-            "strength": "10mg",
-            "dose": "1 viên",
-            "schedule": "khi cần",
-            "duration": "3 ngày",
-            "risk": "normal",
-            "confidence": 0.91
-        }
-    ]
-    
-    # Save to stores
-    prescriptions[prescription_id] = {
-        "prescriptionId": prescription_id,
-        "confidence": 0.90,
-        "doctorName": "BS. Demo",
-        "clinic": "Phòng khám Demo",
-        "issuedAt": "2026-06-04",
-        "status": "pending",
-        "medications": medications,
-        "warnings": []
-    }
-    
-    # Also save to prescription store service
-    save_extracted(prescription_id, medications)
-    
-    return deepcopy(prescriptions[prescription_id])
+    if not file:
+        raise HTTPException(status_code=400, detail="Prescription image is required.")
+    if not HAS_VISION:
+        raise HTTPException(status_code=503, detail="Vision scan module is not available.")
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is required for real prescription image upload.")
+
+    prescription = await scan_prescription_upload(file)
+    prescriptions[prescription["prescriptionId"]] = prescription
+    save_extracted(prescription["prescriptionId"], prescription["medications"])
+    return deepcopy(prescription)
 
 
 class ConfirmResponse(BaseModel):
@@ -224,12 +185,8 @@ async def confirm_prescription(prescription_id: str):
     # Save confirmed status
     prescription["status"] = "confirmed"
     save_confirmed(prescription_id, prescription.get("medications", []))
-    
-    return ConfirmResponse(
-        prescriptionId=prescription_id,
-        status="confirmed",
-        medications=prescription.get("medications", [])
-    )
+
+    return deepcopy(prescription)
 
 
 @app.patch("/prescriptions/{prescription_id}/medications/{medication_id}")
@@ -260,6 +217,7 @@ async def update_medication(
                 med["schedule"] = patch.schedule
             if patch.duration is not None:
                 med["duration"] = patch.duration
+            med["confidence"] = 0.99
             updated = True
             break
     
@@ -268,11 +226,8 @@ async def update_medication(
     
     # Save updated medications
     save_confirmed(prescription_id, medications)
-    
-    return {
-        "prescriptionId": prescription_id,
-        "medications": medications
-    }
+
+    return deepcopy(prescription)
 
 
 class ChatResponseFrontend(BaseModel):
@@ -285,43 +240,30 @@ class ChatResponseFrontend(BaseModel):
 async def chat(request: ChatRequest):
     """
     Chat endpoint matching frontend format.
-    Uses deterministic responses based on question keywords.
+    Uses the configured OpenAI medication agent.
     """
     prescription = prescriptions.get(request.prescriptionId)
     if not prescription:
         prescription = get_prescription(request.prescriptionId)
     
     if not prescription:
-        return ChatResponseFrontend(
-            answer="Không tìm thấy đơn thuốc. Vui lòng bắt đầu lại.",
-            quickReplies=None
-        )
-    
-    analysis = prescription.get("analysis")
-    question_lower = request.message.lower()
-    medications = analysis.get("medications", []) if analysis else prescription.get("medications", [])
-    
-    quick_replies = None
-    answer = ""
-    
-    # Handle specific question types
-    if "buồn ngủ" in question_lower or " ngủ" in question_lower or "tác dụng phụ" in question_lower:
-        answer = _handle_side_effects(medications)
-        quick_replies = ['Lịch uống trong ngày', 'Hỏi về thuốc', 'Tạo nhắc uống thuốc']
-    elif any(kw in question_lower for kw in ["uống gấp đôi", "tăng liều", "giảm liều", "ngưng", "tang lieu", "giam lieu", "ngung thuoc"]):
-        answer = "Mình không thể thay bác sĩ quyết định đổi liều hoặc ngừng thuốc. Hãy liên hệ bác sĩ để được tư vấn trực tiếp. Việc tự ý thay đổi liều có thể gây nguy hiểm."
-        quick_replies = ['Giải thích từng thuốc', 'Lịch uống trong ngày', 'Đặt lịch với bác sĩ']
-    elif "nhắc" in question_lower or "lịch" in question_lower or "uống thuốc" in question_lower:
-        answer = _handle_reminder_question(medications)
-        quick_replies = ['Tạo tất cả nhắc nhở', 'Chỉ nhắc buổi tối']
-    else:
-        answer = _handle_general_question(medications)
-        quick_replies = ['Tác dụng phụ?', 'Lịch uống trong ngày', 'Tạo nhắc uống thuốc']
-    
-    return ChatResponseFrontend(
-        answer=answer,
-        quickReplies=quick_replies
+        raise HTTPException(status_code=404, detail="Prescription not found. Please upload a prescription first.")
+    if prescription.get("status") != "confirmed":
+        raise HTTPException(status_code=400, detail="Confirm prescription before chatting.")
+    if not HAS_AGENT:
+        raise HTTPException(status_code=503, detail="Medication chat agent is not available.")
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is required for real medication chat.")
+
+    session_id = request.sessionId or request.prescriptionId
+    session = get_chat_session(session_id, request.prescriptionId)
+    result = answer_medication_question(
+        deepcopy(prescription),
+        request.message,
+        history=session["history"],
     )
+    append_chat_history(session, request.message, result["answer"])
+    return {**result, "sessionId": session_id}
 
 
 def _handle_side_effects(medications: list) -> str:

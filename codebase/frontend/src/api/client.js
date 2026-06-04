@@ -1,6 +1,8 @@
 import { createMockApi } from '../data/mockApi.js'
 
-const baseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '')
+const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim()
+const forceMock = import.meta.env.VITE_USE_MOCK === 'true'
+const baseUrl = forceMock ? '' : (configuredBaseUrl || 'http://localhost:8000').replace(/\/$/, '')
 const mockApi = createMockApi()
 
 async function request(path, options = {}) {

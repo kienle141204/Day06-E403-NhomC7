@@ -25,11 +25,12 @@ npm run preview  # Preview bản build
 
 | Biến | Mô tả |
 |------|-------|
-| `VITE_API_BASE_URL` | URL backend thật (nếu có). Nếu bỏ trống, app dùng mock API. |
+| `VITE_API_BASE_URL` | URL backend thật. Mặc định là `http://localhost:8000`. |
+| `VITE_USE_MOCK` | Đặt `true` nếu muốn ép frontend dùng mock API. |
 
 Tạo file `frontend/.env` nếu cần:
 ```
-VITE_API_BASE_URL=http://localhost:3000
+VITE_API_BASE_URL=http://localhost:8000
 ```
 
 ---

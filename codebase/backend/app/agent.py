@@ -86,7 +86,7 @@ def answer_medication_question(
             detail="OPENAI_API_KEY is not configured for medication chat.",
         )
 
-    model = os.getenv("OPENAI_MODEL", "gpt-5.2")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     client = OpenAI(api_key=api_key)
 
     try:
